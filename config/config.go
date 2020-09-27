@@ -18,14 +18,11 @@
 package config
 
 import (
-	"bytes"
-	"compress/zlib"
-	"io"
 	"io/ioutil"
 	"os"
 	"runtime"
 
-	"github.com/Velocidex/yaml"
+	"github.com/Velocidex/yaml/v2"
 	errors "github.com/pkg/errors"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	constants "www.velocidex.com/golang/velociraptor/constants"
@@ -39,43 +36,53 @@ var (
 )
 
 // Return the location of the writeback file.
-func WritebackLocation(self *config_proto.Config) string {
+func WritebackLocation(self *config_proto.Config) (string, error) {
+	if self.Client == nil {
+		return "", errors.New("Client not configured")
+	}
+
 	switch runtime.GOOS {
 	case "darwin":
-		return os.ExpandEnv(self.Client.WritebackDarwin)
+		return os.ExpandEnv(self.Client.WritebackDarwin), nil
 	case "linux":
-		return os.ExpandEnv(self.Client.WritebackLinux)
+		return os.ExpandEnv(self.Client.WritebackLinux), nil
 	case "windows":
-		return os.ExpandEnv(self.Client.WritebackWindows)
+		return os.ExpandEnv(self.Client.WritebackWindows), nil
 	default:
-		return os.ExpandEnv(self.Client.WritebackLinux)
+		return os.ExpandEnv(self.Client.WritebackLinux), nil
+	}
+}
+
+func GetVersion() *config_proto.Version {
+	return &config_proto.Version{
+		Name:      "velociraptor",
+		Version:   constants.VERSION,
+		BuildTime: build_time,
+		Commit:    commit_hash,
 	}
 }
 
 // Create a default configuration object.
 func GetDefaultConfig() *config_proto.Config {
 	result := &config_proto.Config{
-		Version: &config_proto.Version{
-			Name:      "velociraptor",
-			Version:   constants.VERSION,
-			BuildTime: build_time,
-			Commit:    commit_hash,
-		},
 		Client: &config_proto.ClientConfig{
 			WritebackDarwin: "/etc/velociraptor.writeback.yaml",
 			WritebackLinux:  "/etc/velociraptor.writeback.yaml",
 			WritebackWindows: "$ProgramFiles\\Velociraptor\\" +
 				"velociraptor.writeback.yaml",
-			MaxPoll: 600,
+			TempdirWindows: "$ProgramFiles\\Velociraptor\\Tools",
+			MaxPoll:        60,
 
 			// Local ring buffer to queue messages to the
 			// server. If the server is not available we
 			// write these to disk so we can send them
 			// next time we are online.
 			LocalBuffer: &config_proto.RingBufferConfig{
-				MemorySize: 50 * 1024 * 1024,
-				DiskSize:   1024 * 1024 * 1024,
-				Filename:   "$Temp/Velociraptor_Buffer.bin",
+				MemorySize:      50 * 1024 * 1024,
+				DiskSize:        1024 * 1024 * 1024,
+				FilenameLinux:   "/var/tmp/Velociraptor_Buffer.bin",
+				FilenameWindows: "$TEMP/Velociraptor_Buffer.bin",
+				FilenameDarwin:  "/var/tmp/Velociraptor_Buffer.bin",
 			},
 
 			// Specific instructions for the
@@ -116,22 +123,35 @@ func GetDefaultConfig() *config_proto.Config {
 				"127.0.0.1/12", "192.168.0.0/16",
 			},
 			ReverseProxy: []*config_proto.ReverseProxyConfig{},
+			Authenticator: &config_proto.Authenticator{
+				Type: "Basic",
+			},
 		},
 		CA: &config_proto.CAConfig{},
 		Frontend: &config_proto.FrontendConfig{
+			Hostname: "localhost",
+
 			// A public interface for clients to
 			// connect to.
 			BindAddress:   "0.0.0.0",
 			BindPort:      8000,
 			MaxUploadSize: constants.MAX_MEMORY * 2,
+			DefaultClientMonitoringArtifacts: []string{
+				// Essential for client resource telemetry.
+				"Generic.Client.Stats",
+			},
+			DynDns:          &config_proto.DynDNSConfig{},
+			ExpectedClients: 10000,
+			GRPCPoolMaxSize: 100,
+			GRPCPoolMaxWait: 60,
 		},
 		Datastore: &config_proto.DatastoreConfig{
 			Implementation: "FileBaseDataStore",
 
 			// Users would probably need to change
 			// this to something more permanent.
-			Location:           "/tmp/velociraptor",
-			FilestoreDirectory: "/tmp/velociraptor",
+			Location:           "/var/tmp/velociraptor",
+			FilestoreDirectory: "/var/tmp/velociraptor",
 		},
 		Writeback: &config_proto.Writeback{},
 		Mail:      &config_proto.MailConfig{},
@@ -141,14 +161,12 @@ func GetDefaultConfig() *config_proto.Config {
 			BindPort:    8003,
 		},
 		ApiConfig: &config_proto.ApiClientConfig{},
-
-		// Use SSL by default - there is no real reason not to.
-		DisableSelfSignedSsl: false,
 	}
 
 	// The client's version needs to keep in sync with the
 	// server's version.
-	result.Client.Version = result.Version
+	result.Client.Version = GetVersion()
+	result.Version = result.Client.Version
 
 	// On windows we need slightly different defaults.
 	if runtime.GOOS == "windows" {
@@ -157,101 +175,6 @@ func GetDefaultConfig() *config_proto.Config {
 	}
 
 	return result
-}
-
-func ReadEmbeddedConfig() (*config_proto.Config, error) {
-	idx := bytes.IndexByte(FileConfigDefaultYaml, '\n')
-	if FileConfigDefaultYaml[idx+1] == '#' {
-		return nil, errors.New(
-			"No embedded config - try to pack one with the pack command or " +
-				"provide the --config flag.")
-	}
-
-	r, err := zlib.NewReader(bytes.NewReader(FileConfigDefaultYaml[idx+1:]))
-	if err != nil {
-		return nil, err
-	}
-
-	b := &bytes.Buffer{}
-	io.Copy(b, r)
-	r.Close()
-
-	result := GetDefaultConfig()
-	err = yaml.Unmarshal(b.Bytes(), result)
-	if err != nil {
-		return nil, err
-	}
-
-	return result, nil
-}
-
-// Load the config stored in the YAML file and returns a config object.
-func LoadConfig(filename string) (*config_proto.Config, error) {
-	default_config := GetDefaultConfig()
-	result := GetDefaultConfig()
-
-	verify_config := func(config_obj *config_proto.Config) {
-		// TODO: Check if the config version is compatible with our
-		// version. We always set the result's version to our version.
-		config_obj.Version = default_config.Version
-		config_obj.Client.Version = default_config.Version
-
-		if config_obj.API.PinnedGwName == "" {
-			config_obj.API.PinnedGwName = "GRPC_GW"
-		}
-
-		if config_obj.Client.PinnedServerName == "" {
-			config_obj.Client.PinnedServerName = "VelociraptorServer"
-		}
-	}
-
-	// If filename is specified we try to read from it.
-	if filename != "" {
-		data, err := ioutil.ReadFile(filename)
-		if err == nil {
-			err = yaml.UnmarshalStrict(data, result)
-			if err != nil {
-				return nil, errors.WithStack(err)
-			}
-
-			verify_config(result)
-
-			return result, nil
-		}
-	}
-
-	// Otherwise we try to read from the embedded config.
-	embedded_config, err := ReadEmbeddedConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	verify_config(embedded_config)
-
-	return embedded_config, nil
-}
-
-func LoadClientConfig(filename string) (*config_proto.Config, error) {
-	client_config, err := LoadConfig(filename)
-	if err != nil {
-		return nil, err
-	}
-
-	existing_writeback := &config_proto.Writeback{}
-	data, err := ioutil.ReadFile(WritebackLocation(client_config))
-	// Failing to read the file is not an error - the file may not
-	// exist yet.
-	if err == nil {
-		err = yaml.Unmarshal(data, existing_writeback)
-		if err != nil {
-			return nil, errors.WithStack(err)
-		}
-	}
-
-	// Merge the writeback with the config.
-	client_config.Writeback = existing_writeback
-
-	return client_config, nil
 }
 
 func WriteConfigToFile(filename string, config *config_proto.Config) error {
@@ -270,8 +193,9 @@ func WriteConfigToFile(filename string, config *config_proto.Config) error {
 
 // Update the client's writeback file.
 func UpdateWriteback(config_obj *config_proto.Config) error {
-	if WritebackLocation(config_obj) == "" {
-		return nil
+	location, err := WritebackLocation(config_obj)
+	if err != nil {
+		return err
 	}
 
 	bytes, err := yaml.Marshal(config_obj.Writeback)
@@ -280,7 +204,7 @@ func UpdateWriteback(config_obj *config_proto.Config) error {
 	}
 
 	// Make sure the new file is only readable by root.
-	err = ioutil.WriteFile(WritebackLocation(config_obj), bytes, 0600)
+	err = ioutil.WriteFile(location, bytes, 0600)
 	if err != nil {
 		return errors.WithStack(err)
 	}

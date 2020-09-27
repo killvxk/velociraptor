@@ -18,12 +18,13 @@
 package csv
 
 import (
+	"context"
 	"io"
-	"os"
 	"sync"
 	"time"
 
-	"www.velocidex.com/golang/velociraptor/file_store"
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -41,9 +42,9 @@ func (self *CSVWriter) Close() {
 	self.wg.Wait()
 }
 
-type CSVReader chan *vfilter.Dict
+type CSVReader chan *ordereddict.Dict
 
-func GetCSVReader(fd file_store.ReadSeekCloser) CSVReader {
+func GetCSVReader(ctx context.Context, fd api.FileReader) CSVReader {
 	output_chan := make(CSVReader)
 
 	go func() {
@@ -57,7 +58,7 @@ func GetCSVReader(fd file_store.ReadSeekCloser) CSVReader {
 
 	process_file:
 		for {
-			row := vfilter.NewDict()
+			row := ordereddict.NewDict()
 			row_data, err := csv_reader.ReadAny()
 			if err != nil {
 				break process_file
@@ -70,7 +71,11 @@ func GetCSVReader(fd file_store.ReadSeekCloser) CSVReader {
 				row.Set(headers[idx], row_item)
 			}
 
-			output_chan <- row
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- row:
+			}
 		}
 	}()
 
@@ -112,7 +117,10 @@ func GetCSVAppender(scope *vfilter.Scope, fd io.Writer, write_headers bool) *CSV
 				}
 
 				if !headers_written {
-					w.Write(columns)
+					err := w.Write(columns)
+					if err != nil {
+						return
+					}
 					headers_written = true
 				}
 
@@ -126,7 +134,10 @@ func GetCSVAppender(scope *vfilter.Scope, fd io.Writer, write_headers bool) *CSV
 					item, _ := scope.Associative(row, column)
 					csv_row = append(csv_row, item)
 				}
-				w.WriteAny(csv_row)
+				err := w.WriteAny(csv_row)
+				if err != nil {
+					return
+				}
 
 			case <-time.After(5 * time.Second):
 				w.Flush()
@@ -138,10 +149,9 @@ func GetCSVAppender(scope *vfilter.Scope, fd io.Writer, write_headers bool) *CSV
 
 	return result
 }
-
-func GetCSVWriter(scope *vfilter.Scope, fd file_store.WriteSeekCloser) (*CSVWriter, error) {
+func GetCSVWriter(scope *vfilter.Scope, fd api.FileWriter) (*CSVWriter, error) {
 	// Seek to the end of the file.
-	length, err := fd.Seek(0, os.SEEK_END)
+	length, err := fd.Size()
 	if err != nil {
 		return nil, err
 	}

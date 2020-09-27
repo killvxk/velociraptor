@@ -23,7 +23,7 @@ import (
 	"io/ioutil"
 	"path"
 
-	"github.com/Velocidex/yaml"
+	"github.com/Velocidex/yaml/v2"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 	config "www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
@@ -31,6 +31,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/executor"
 	"www.velocidex.com/golang/velociraptor/http_comms"
 	"www.velocidex.com/golang/velociraptor/server"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 var (
@@ -46,20 +47,27 @@ var (
 )
 
 func doPoolClient() {
-	client_config, err := config.LoadConfig(*config_path)
+	client_config, err := DefaultConfigLoader.
+		WithRequiredClient().
+		WithVerbose(true).
+		LoadAndValidate()
 	kingpin.FatalIfError(err, "Unable to load config file")
+
+	sm, err := startEssentialServices(client_config)
+	kingpin.FatalIfError(err, "Starting services.")
+	defer sm.Close()
+
 	server.IncreaseLimits(client_config)
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	number_of_clients := *pool_client_number
 	if number_of_clients <= 0 {
 		number_of_clients = 2
 	}
 
 	for i := 0; i < number_of_clients; i++ {
-		client_config, err := config.LoadConfig(*config_path)
-		kingpin.FatalIfError(err, "Unable to load config file")
-
 		client_config.Client.WritebackLinux = path.Join(
 			*pool_client_writeback_dir,
 			fmt.Sprintf("pool_client.yaml.%d", i))
@@ -67,7 +75,10 @@ func doPoolClient() {
 		client_config.Client.WritebackWindows = client_config.Client.WritebackLinux
 
 		existing_writeback := &config_proto.Writeback{}
-		data, err := ioutil.ReadFile(config.WritebackLocation(client_config))
+		writeback, err := config.WritebackLocation(client_config)
+		kingpin.FatalIfError(err, "Unable to load writeback file")
+
+		data, err := ioutil.ReadFile(writeback)
 
 		// Failing to read the file is not an error - the file may not
 		// exist yet.
@@ -89,7 +100,7 @@ func doPoolClient() {
 			client_config, []byte(client_config.Writeback.PrivateKey))
 		kingpin.FatalIfError(err, "Unable to parse config file")
 
-		exe, err := executor.NewClientExecutor(client_config)
+		exe, err := executor.NewClientExecutor(ctx, client_config)
 		kingpin.FatalIfError(err, "Can not create executor.")
 
 		comm, err := http_comms.NewHTTPCommunicator(
@@ -97,6 +108,8 @@ func doPoolClient() {
 			manager,
 			exe,
 			client_config.Client.ServerUrls,
+			nil,
+			utils.RealClock{},
 		)
 		kingpin.FatalIfError(err, "Can not create HTTPCommunicator.")
 

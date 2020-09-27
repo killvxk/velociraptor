@@ -46,8 +46,7 @@ const FileHexViewController = function(
   this.chunkSize_ = (this.rows_) * this.columns_;
 
   this.scope_.$watchGroup(['controller.fileContext.clientId',
-                           'controller.fileContext.selectedFilePath',
-                           'controller.fileContext.selectedFileVersion'],
+                           'controller.fileContext.selectedFilePath'],
       this.onContextChange_.bind(this));
 
   this.scope_.$watch('controller.page', this.onPageChange_.bind(this));
@@ -105,7 +104,7 @@ FileHexViewController.prototype.fetchText_ = function() {
 
   this.pageCount = Math.ceil(total_size / this.chunkSize_);
 
-  var url = 'v1/DownloadVFSFile/' + clientId + '/' + filePath;
+  var url = 'v1/DownloadVFSFile';
   var params = {
     offset: this.offset_,
     length: this.chunkSize_,
@@ -161,7 +160,7 @@ exports.FileHexViewDirective = function() {
     restrict: 'E',
     scope: {},
     require: '^grrFileContext',
-    templateUrl: '/static/angular-components/client/virtual-file-system/file-hex-view.html',
+    templateUrl: window.base_path+'/static/angular-components/client/virtual-file-system/file-hex-view.html',
     controller: FileHexViewController,
     controllerAs: 'controller',
     link: function(scope, element, attrs, fileContextController) {

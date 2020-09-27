@@ -1,22 +1,16 @@
-Select Name, Uid, Gid, Directory, Type  from Artifact.Windows.Sys.Users() WHERE Name in ("appveyor", "Administrator", "Guest")[
+Select Name, Uid, Gid, Directory, Type  from Artifact.Windows.Sys.Users() WHERE Name in ("Guest", "runneradmin") ORDER BY Name[
  {
-  "Directory": "C:\\Users\\Administrator",
-  "Gid": 513,
-  "Name": "Administrator",
-  "Type": "local",
-  "Uid": 500
- },
- {
-  "Directory": "C:\\Users\\appveyor",
-  "Gid": 513,
-  "Name": "appveyor",
-  "Type": "local",
-  "Uid": 1001
- },
- {
-  "Gid": 513,
   "Name": "Guest",
-  "Type": "local",
-  "Uid": 501
+  "Uid": 501,
+  "Gid": 513,
+  "Directory": null,
+  "Type": "local"
+ },
+ {
+  "Name": "runneradmin",
+  "Uid": 500,
+  "Gid": 513,
+  "Directory": "C:\\Users\\runneradmin",
+  "Type": "local"
  }
 ]

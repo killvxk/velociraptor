@@ -22,20 +22,19 @@
 package filesystems
 
 import (
-	"context"
-	"encoding/json"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
+	"github.com/Velocidex/ordereddict"
 	errors "github.com/pkg/errors"
 	"github.com/shirou/gopsutil/disk"
-	"golang.org/x/sys/windows/registry"
 	"www.velocidex.com/golang/velociraptor/glob"
+	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/velociraptor/vql/windows/wmi"
+	"www.velocidex.com/golang/vfilter"
 )
 
 type OSFileInfo struct {
@@ -43,8 +42,9 @@ type OSFileInfo struct {
 
 	// Empty for files but may contain data for registry and
 	// resident NTFS.
-	_data      string
 	_full_path string
+
+	follow_links bool
 }
 
 func (self *OSFileInfo) FullPath() string {
@@ -52,28 +52,37 @@ func (self *OSFileInfo) FullPath() string {
 }
 
 func (self *OSFileInfo) Data() interface{} {
-	return self._data
+	if self.IsLink() {
+		path := strings.TrimRight(
+			strings.TrimLeft(self.FullPath(), "\\"), "\\")
+		target, err := os.Readlink(path)
+		if err == nil {
+			return ordereddict.NewDict().
+				Set("Link", target)
+		}
+	}
+	return ordereddict.NewDict()
 }
 
-func (self *OSFileInfo) Mtime() glob.TimeVal {
+func (self *OSFileInfo) Mtime() utils.TimeVal {
 	nsec := self.sys().LastWriteTime.Nanoseconds()
-	return glob.TimeVal{
+	return utils.TimeVal{
 		Sec:  nsec / 1000000000,
 		Nsec: nsec,
 	}
 }
 
-func (self *OSFileInfo) Ctime() glob.TimeVal {
+func (self *OSFileInfo) Ctime() utils.TimeVal {
 	nsec := self.sys().CreationTime.Nanoseconds()
-	return glob.TimeVal{
+	return utils.TimeVal{
 		Sec:  nsec / 1000000000,
 		Nsec: nsec,
 	}
 }
 
-func (self *OSFileInfo) Atime() glob.TimeVal {
+func (self *OSFileInfo) Atime() utils.TimeVal {
 	nsec := self.sys().LastAccessTime.Nanoseconds()
-	return glob.TimeVal{
+	return utils.TimeVal{
 		Sec:  nsec / 1000000000,
 		Nsec: nsec,
 	}
@@ -84,6 +93,10 @@ func (self *OSFileInfo) IsLink() bool {
 }
 
 func (self *OSFileInfo) GetLink() (string, error) {
+	if !self.follow_links {
+		return "", errors.New("Not following links")
+	}
+
 	path := strings.TrimRight(
 		strings.TrimLeft(self.FullPath(), "\\"), "\\")
 	target, err := os.Readlink(path)
@@ -95,36 +108,6 @@ func (self *OSFileInfo) GetLink() (string, error) {
 
 func (self *OSFileInfo) sys() *syscall.Win32FileAttributeData {
 	return self.Sys().(*syscall.Win32FileAttributeData)
-}
-
-func (self *OSFileInfo) MarshalJSON() ([]byte, error) {
-	result, err := json.Marshal(&struct {
-		FullPath string
-		Size     int64
-		Mode     os.FileMode
-		ModeStr  string
-		ModTime  time.Time
-		Sys      interface{}
-		Mtime    glob.TimeVal
-		Ctime    glob.TimeVal
-		Atime    glob.TimeVal
-	}{
-		FullPath: self.FullPath(),
-		Size:     self.Size(),
-		Mode:     self.Mode(),
-		ModeStr:  self.Mode().String(),
-		ModTime:  self.ModTime(),
-		Sys:      self.Sys(),
-		Mtime:    self.Mtime(),
-		Ctime:    self.Ctime(),
-		Atime:    self.Atime(),
-	})
-
-	return result, err
-}
-
-func (u *OSFileInfo) UnmarshalJSON(data []byte) error {
-	return nil
 }
 
 func getAvailableDrives() ([]string, error) {
@@ -141,24 +124,31 @@ func getAvailableDrives() ([]string, error) {
 	return result, nil
 }
 
+// Glob sends us paths in normal form which we need to convert to
+// windows form. Normal form uses / instead of \ and always has a
+// leading /.
 func GetPath(path string) string {
-	expanded_path, err := registry.ExpandString(path)
-	if err == nil {
-		path = expanded_path
+	if strings.HasPrefix(path, "\\\\") {
+		return path
 	}
 
-	// Add a final \ to turn path into a directory path.
-	path = normalize_path(path)
+	path = strings.Replace(path, "/", "\\", -1)
 
 	// Strip leading \\ so \\c:\\windows -> c:\\windows
-	return strings.TrimLeft(path, "\\")
+	path = strings.TrimLeft(path, "\\")
+	if path == "." {
+		return ""
+	}
+	return path
 }
 
-type OSFileSystemAccessor struct{}
+type OSFileSystemAccessor struct {
+	follow_links bool
+}
 
-func (self OSFileSystemAccessor) New(ctx context.Context) glob.FileSystemAccessor {
-	result := &OSFileSystemAccessor{}
-	return result
+func (self OSFileSystemAccessor) New(scope *vfilter.Scope) (glob.FileSystemAccessor, error) {
+	result := &OSFileSystemAccessor{follow_links: self.follow_links}
+	return result, nil
 }
 
 func discoverDriveLetters() ([]glob.FileInfo, error) {
@@ -225,8 +215,12 @@ func (self OSFileSystemAccessor) readDir(path string, depth int) ([]glob.FileInf
 
 	// For this reason we need to take special care when reading a
 	// directory in case that directory itself is a link.
-	files, err := ioutil.ReadDir(dir_path)
+	files, err := utils.ReadDir(dir_path)
 	if err != nil {
+		if !self.follow_links {
+			return nil, err
+		}
+
 		// Maybe it is a symlink
 		link_path := GetPath(path)
 		target, err := os.Readlink(link_path)
@@ -234,32 +228,34 @@ func (self OSFileSystemAccessor) readDir(path string, depth int) ([]glob.FileInf
 
 			// Yes it is a symlink, we just recurse into
 			// the target
-			files, err = ioutil.ReadDir(target)
+			files, err = utils.ReadDir(target)
 		}
 	}
 
 	for _, f := range files {
 		result = append(result,
 			&OSFileInfo{
-				FileInfo:   f,
-				_full_path: filepath.Join(path, f.Name()),
+				follow_links: self.follow_links,
+				FileInfo:     f,
+				_full_path:   dir_path + f.Name(),
 			})
 	}
 	return result, nil
 }
 
 func (self OSFileSystemAccessor) Open(path string) (glob.ReadSeekCloser, error) {
-	// Strip leading \\ so \\c:\\windows -> c:\\windows
 	path = GetPath(path)
 	file, err := os.Open(path)
 	return file, err
 }
 
 func (self *OSFileSystemAccessor) Lstat(path string) (glob.FileInfo, error) {
+
 	stat, err := os.Lstat(GetPath(path))
 	return &OSFileInfo{
-		FileInfo:   stat,
-		_full_path: path,
+		follow_links: self.follow_links,
+		FileInfo:     stat,
+		_full_path:   path,
 	}, err
 }
 
@@ -276,21 +272,15 @@ func (self *OSFileSystemAccessor) PathJoin(x, y string) string {
 	return filepath.Join(x, y)
 }
 
-// Glob sends us paths in normal form which we need to convert to
-// windows form. Normal form uses / instead of \ and always has a
-// leading /.
-func normalize_path(path string) string {
-	path = filepath.Clean(strings.Replace(path, "/", "\\", -1))
-	path = strings.TrimLeft(path, "\\")
-	if path == "." {
-		return ""
-	}
-	return path
-}
-
 func init() {
+	// Register a variant which allows following links - be
+	// careful with it - it can get stuck on loops.
+	glob.Register("file_links", &OSFileSystemAccessor{follow_links: true})
+
 	// We do not register the OSFileSystemAccessor directly - it
 	// is used through the AutoFilesystemAccessor: If we can not
 	// open the file with regular OS APIs we fallback to raw NTFS
 	// access. This is usually what we want.
+
+	json.RegisterCustomEncoder(&OSFileInfo{}, glob.MarshalGlobFileInfo)
 }

@@ -4,22 +4,34 @@ all:
 auto:
 	go run make.go -v auto
 
-test:
+test: golden
 	go test ./...
-	./output/velociraptor --config artifacts/testdata/windows/test.config.yaml \
-	     golden artifacts/testdata/server/testcases/ --env srcDir=`pwd`
+
+golden:
+	./output/velociraptor -v --config artifacts/testdata/windows/test.config.yaml golden artifacts/testdata/server/testcases/ --env srcDir=`pwd`
+
+references:
+	./output/velociraptor vql export docs/references/vql.yaml > docs/references/vql.yaml.tmp
+	mv docs/references/vql.yaml.tmp docs/references/vql.yaml
 
 release:
 	go run make.go -v release
 
+linux:
+	go run make.go -v linux
+
 windows:
 	go run make.go -v windowsDev
+
+windowsx86:
+	go run make.go -v windowsx86
 
 clean:
 	go run make.go -v clean
 
 generate:
 	go generate ./vql/windows/win32_windows.go
+	go generate ./api/mock/
 
 check:
 	staticcheck ./...
@@ -32,7 +44,11 @@ build_release: build_docker
 	echo Building release into output directory.
 	docker run --rm -v `pwd`:/build/ -u `id -u`:`id -g` -e HOME=/tmp/  velo_builder
 
-
 debug:
-	dlv debug --build-flags="-tags 'release server_vql extras'" \
-		./bin/ -- frontend -v
+	dlv debug --wd=. --build-flags="-tags 'server_vql extras'" ./bin/ -- frontend -v --debug
+
+debug_client:
+	dlv debug --build-flags="-tags 'server_vql extras'" ./bin/ -- client -v
+
+lint:
+	golangci-lint run

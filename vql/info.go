@@ -18,22 +18,20 @@
 package vql
 
 import (
+	"os"
 	"runtime"
 
 	fqdn "github.com/Showmax/go-fqdn"
+	"github.com/Velocidex/ordereddict"
 	"github.com/shirou/gopsutil/host"
 
+	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/vfilter"
 )
 
-type InfoStat struct {
-	host.InfoStat
-	Fqdn         string
-	Architecture string
-}
-
-func getInfo(host *host.InfoStat) *vfilter.Dict {
-	return vfilter.NewDict().
+func getInfo(host *host.InfoStat) *ordereddict.Dict {
+	me, _ := os.Executable()
+	return ordereddict.NewDict().
 		Set("Hostname", host.Hostname).
 		Set("Uptime", host.Uptime).
 		Set("BootTime", host.BootTime).
@@ -45,23 +43,50 @@ func getInfo(host *host.InfoStat) *vfilter.Dict {
 		Set("KernelVersion", host.KernelVersion).
 		Set("VirtualizationSystem", host.VirtualizationSystem).
 		Set("VirtualizationRole", host.VirtualizationRole).
-		Set("HostID", host.HostID)
+		Set("HostID", host.HostID).
+		Set("Exe", me)
 }
 
 func init() {
-	exportedPlugins = append(exportedPlugins,
+	RegisterPlugin(
 		vfilter.GenericListPlugin{
 			PluginName: "info",
 			Function: func(
 				scope *vfilter.Scope,
-				args *vfilter.Dict) []vfilter.Row {
+				args *ordereddict.Dict) []vfilter.Row {
 				var result []vfilter.Row
-				if info, err := host.Info(); err == nil {
-					item := getInfo(info).
-						Set("Fqdn", fqdn.Get()).
-						Set("Architecture", runtime.GOARCH)
-					result = append(result, item)
+
+				err := CheckAccess(scope, acls.MACHINE_STATE)
+				if err != nil {
+					scope.Log("info: %s", err)
+					return result
 				}
+
+				arg := &vfilter.Empty{}
+				err = vfilter.ExtractArgs(scope, args, arg)
+				if err != nil {
+					scope.Log("info: %s", err.Error())
+					return result
+				}
+
+				// It turns out that host.Info() is
+				// actually rather slow so we cache it
+				// in the scope cache.
+				info, ok := CacheGet(scope, "__info").(*host.InfoStat)
+				if !ok {
+					info, err = host.Info()
+					if err != nil {
+						scope.Log("info: %s", err)
+						return result
+					}
+					CacheSet(scope, "__info", info)
+				}
+
+				item := getInfo(info).
+					Set("Fqdn", fqdn.Get()).
+					Set("Architecture", runtime.GOARCH)
+				result = append(result, item)
+
 				return result
 			},
 			Doc: "Get information about the running host.",

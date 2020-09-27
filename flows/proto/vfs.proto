@@ -1,9 +1,37 @@
 syntax = "proto3";
 
-import "www.velocidex.com/golang/velociraptor/proto/semantic.proto";
-import "www.velocidex.com/golang/velociraptor/actions/proto/vql.proto";
+import "proto/semantic.proto";
+import "actions/proto/vql.proto";
 
 package proto;
+
+option go_package = "www.velocidex.com/golang/velociraptor/flows/proto";
+
+message VFSDownloadInfo {
+    string vfs_path = 1;
+    uint64 size = 2;
+    uint64 mtime = 3;
+    bool sparse = 4;
+}
+
+message VFSListResponse {
+  string Response = 1;
+  repeated string Columns = 2;
+  VQLRequest Query = 3;
+  uint64 timestamp = 4;
+  uint64 total_rows = 7;
+  repeated VQLTypeMap types = 8;
+
+  // The actual artifact that contains the data.
+  string client_id = 9;
+  string flow_id = 10;
+}
+
+message VFSStatDownloadRequest {
+    string client_id = 1;
+    string accessor = 4;
+    string path = 5;
+}
 
 message VFSListRequest {
     string client_id = 1 [(sem_type) = {

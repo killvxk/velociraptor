@@ -136,6 +136,9 @@ img.velo-logo {
 
 .search-table {
     margin-left: 15px;
+    height: 100%;
+    display: block;
+    overflow: auto;
 }
 
 .navbar-text p {
@@ -282,7 +285,7 @@ div[ui-view]  > * {
 }
 
 .high-modal > .modal-dialog {
-  max-height: 600px
+  max-height: 900px
 }
 
 
@@ -605,6 +608,19 @@ dd.histogram  > div {
   height: 100%;
 }
 
+td.table-actions {
+    width: 8px;
+    padding: 0px !important;
+}
+
+.table-actions {
+    color: black;
+}
+
+.artifact-links {
+    color: black;
+}
+
 .fill-parent {
   position: absolute;
   left: 1em;
@@ -832,11 +848,13 @@ abbr[title] {
   transform: translate(0, 0);
 }
 
+.notebook-editor {
+    border-width: 4px;
+    border-style: inset;
+}
 
 .ace_editor {
-    min-height: 400px;
-    min-width: 600px;
-    max-height: 80%;
+    height: 100%;
 }
 
 .dashboard {
@@ -984,11 +1002,14 @@ grr-client-events, grr-server-artifacts, grr-user-dashboard, grr-artifact-viewer
 .navicon {
     margin-right: 10px;
     font-size: 18px;
-    color: var(--sidebar-icon-color);
 }
 
 grr-navigator a {
     color: var(--sidebar-icon-color);
+}
+
+grr-navigator li a.nav-link.disabled {
+    color: var(--sidebar-icon-color-disabled);
 }
 
 grr-navigator li.active a {
@@ -1013,11 +1034,6 @@ li.active .navicon {
     height: 33px;
 }
 
-.hamburger {
-    margin-left: -10px;
-}
-
-
 div.artifact-view-table {
     max-height: -webkit-fill-available;
     max-height: -moz-available;
@@ -1035,4 +1051,69 @@ body {
 
 .description {
     color: gray;
+}
+
+.collapse {
+    visibility: visible;
+}
+
+
+#snackbar {
+    visibility: hidden; /* Hidden by default. Visible on click */
+    min-width: 250px; /* Set a default minimum width */
+    margin-left: -125px; /* Divide value of min-width by 2 */
+    background-color: #333; /* Black background color */
+    color: #fff; /* White text color */
+    text-align: center; /* Centered text */
+    border-radius: 2px; /* Rounded borders */
+    padding: 16px; /* Padding */
+    position: fixed; /* Sit on top of the screen */
+    z-index: 1; /* Add a z-index if needed */
+    left: 50%; /* Center the snackbar */
+    bottom: 30px; /* 30px from the bottom */
+}
+
+/* Show the snackbar when clicking on a button (class added with JavaScript) */
+#snackbar.show {
+    visibility: visible; /* Show the snackbar */
+      /* Add animation: Take 0.5 seconds to fade in and out the snackbar.
+         However, delay the fade out process for 2.5 seconds */
+    -webkit-animation: fadein 0.5s, fadeout 0.5s 2.5s;
+    animation: fadein 0.5s, fadeout 0.5s 2.5s;
+}
+
+/* Animations to fade the snackbar in and out */
+@-webkit-keyframes fadein {
+    from {bottom: 0; opacity: 0;}
+    to {bottom: 30px; opacity: 1;}
+}
+
+@keyframes fadein {
+    from {bottom: 0; opacity: 0;}
+    to {bottom: 30px; opacity: 1;}
+}
+
+@-webkit-keyframes fadeout {
+    from {bottom: 30px; opacity: 1;}
+    to {bottom: 0; opacity: 0;}
+}
+
+@keyframes fadeout {
+    from {bottom: 30px; opacity: 1;}
+    to {bottom: 0; opacity: 0;}
+}
+
+.close-icon {
+    cursor: pointer;
+}
+
+
+ul.unlisted {
+    list-style-type: none;
+}
+
+@font-face {
+  font-family: 'Glyphicons Halflings';
+  src: url('glyphicons-halflings-regular.eot');
+  src: url('glyphicons-halflings-regular.eot?#iefix') format('embedded-opentype'), url('glyphicons-halflings-regular.woff2') format('woff2'), url('glyphicons-halflings-regular.woff') format('woff'), url('glyphicons-halflings-regular.ttf') format('truetype'), url('glyphicons-halflings-regular.svg#glyphicons_halflingsregular') format('svg');
 }

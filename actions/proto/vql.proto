@@ -1,11 +1,13 @@
 // These are the messages used in client actions.
 syntax = "proto3";
 
-import "www.velocidex.com/golang/velociraptor/proto/semantic.proto";
-import "www.velocidex.com/golang/velociraptor/proto/flow_metadata.proto";
-import "www.velocidex.com/golang/velociraptor/artifacts/proto/artifact.proto";
+import "proto/semantic.proto";
+import "proto/flow_metadata.proto";
+import "artifacts/proto/artifact.proto";
 
 package proto;
+
+option go_package = "www.velocidex.com/golang/velociraptor/actions/proto";
 
 message VQLRequest {
     string Name = 2 [(sem_type) = {
@@ -60,6 +62,10 @@ message VQLCollectorArgs {
     uint64 timeout = 25 [(sem_type) = {
             description: "Maximum time for the query to run."
         }];
+
+    repeated string tools = 26 [(sem_type)={
+            description: "A list of tools we will need to run this VQL.",
+        }];
 }
 
 message VQLTypeMap {
@@ -68,9 +74,16 @@ message VQLTypeMap {
 }
 
 message VQLResponse {
+    // Response is encoded in a json array of rows.
     string Response = 1 [(sem_type) = {
             description: "JSON encoded response.",
         }];
+
+    // Response is encoded as line delimited JSON.
+    string JSONLResponse = 10 [(sem_type) = {
+            description: "JSON encoded response.",
+        }];
+
     repeated string Columns = 2 [(sem_type) = {
             description: "A list of column headings produced by the query.",
         }];
@@ -99,6 +112,8 @@ message VQLResponse {
     uint64 total_rows = 7[(sem_type) = {
             description: "Total number of rows in this response part."
         }];
+
+    string log = 9;
 }
 
 
@@ -124,6 +139,7 @@ message VQLEventTable {
 }
 
 message ClientInfo {
+    string client_id = 1;
     string hostname = 3;
     string fqdn = 4;
     string system = 5;

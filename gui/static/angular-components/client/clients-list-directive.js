@@ -184,9 +184,10 @@ ClientsListController.prototype.showLabelsDialog = function(action) {
 /**
  * @export {string}
  * @const
+ *
+ * used by grr-infinite-table directive
  */
-ClientsListController.prototype.clientsQueryUrl =
-    '/v1/SearchClients';
+ClientsListController.prototype.clientsQueryUrl = '/v1/SearchClients';
 
 /**
  * Displays a table of clients.
@@ -194,13 +195,13 @@ ClientsListController.prototype.clientsQueryUrl =
  * @return {angular.Directive} Directive definition object.
  */
 exports.ClientsListDirective = function() {
-  return {
-    scope: {},
-    restrict: 'E',
-    templateUrl: '/static/angular-components/client/clients-list.html',
-    controller: ClientsListController,
-    controllerAs: 'controller'
-  };
+    return {
+        scope: {},
+        restrict: 'E',
+        templateUrl: window.base_path+'/static/angular-components/client/clients-list.html',
+        controller: ClientsListController,
+        controllerAs: 'controller',
+    };
 };
 
 

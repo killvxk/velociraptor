@@ -2,6 +2,7 @@
   <ul class="breadcrumb">
     <li>
       <button class="btn btn-default" name="NewHunt"
+              ng-disabled="!controller.uiTraits.Permissions.collect_client"
               title="New Hunt" ng-click="controller.newHunt()">
         <i class="fa fa-plus"></i>
       </button>
@@ -9,22 +10,24 @@
       <div class="btn-group">
         <button class="btn btn-default" name="RunHunt"
                 title="Run Hunt"
-                ng-disabled="controller.selectedHunt.state != 'PAUSED' &&
-                             controller.selectedHunt.state != 'STOPPED'"
+                ng-disabled="(controller.selectedHunt.state != 'PAUSED' &&
+                             controller.selectedHunt.state != 'STOPPED') ||
+                             !controller.uiTraits.Permissions.collect_client"
                 ng-click="controller.runHunt()">
           <i class="fa fa-play"></i>
         </button>
 
         <button class="btn btn-default" name="StopHunt"
                 title="Stop Hunt"
-                ng-disabled="controller.selectedHunt.state != 'RUNNING'"
+                ng-disabled="controller.huntState(controller.selectedHunt) != 'RUNNING' ||
+                             !controller.uiTraits.Permissions.collect_client"
                 ng-click="controller.stopHunt()">
           <i class="fa fa-stop"></i>
         </button>
-
         <button class="btn btn-default" name="ArchiveHunt"
                 title="Delete Hunt"
-                ng-disabled="!controller.selectedHunt || controller.selectedHunt.state == 'RUNNING'"
+                ng-disabled="controller.huntState(controller.selectedHunt) == 'RUNNING' ||
+                              !controller.uiTraits.Permissions.collect_client"
                 ng-click="controller.deleteHunt()">
           <i class="fa fa-trash"></i>
         </button>
@@ -67,12 +70,12 @@
           ng-class="{'row-selected': item.hunt_id == selectedHuntId}"
           >
 
-        <td><grr-hunt-status-icon state="controller.huntState(item)" /></td>
+        <td><grr-hunt-status-icon state="controller.huntState(item)"></grr-hunt-status-icon></td>
         <td>{$ ::item.hunt_id $}</td>
         <td>{$ ::item.hunt_description $}</td>
-        <td><grr-timestamp value="::item.create_time" /></td>
-        <td><grr-timestamp value="::item.start_time" /></td>
-        <td><grr-timestamp value="::item.expires" /></td>
+        <td><grr-timestamp value="::item.create_time"></grr-timestamp></td>
+        <td><grr-timestamp value="::item.start_time"></grr-timestamp></td>
+        <td><grr-timestamp value="::item.expires"></grr-timestamp></td>
         <td>{$ ::item.client_limit || 'Unlimited' $}</td>
         <td>{$ ::item.stats.total_clients_scheduled || 0 $}</td>
         <td>{$ ::item.creator $}</td>

@@ -1,30 +1,33 @@
-SELECT * FROM  Artifact.Windows.Sysinternals.Autoruns( binaryURL="https://storage.googleapis.com/go.velocidex.com/", AutorunArgs="-nobanner -accepteula -a b -c *") WHERE Company =~ "Microsoft"[
+SELECT inventory_add(tool='Autorun_amd64', url='https://storage.googleapis.com/go.velocidex.com/autorunsc.exe', hash='083d7eee4ed40a3e5a35675503b0b6be0cb627b4cb1009d185a558a805f64153', filename='autorunsc_x64.exe') FROM scope()[
  {
-  "Category": "Boot Execute",
-  "Company": "Microsoft Corporation",
-  "Description": "Auto Check Utility",
-  "Enabled": "enabled",
-  "Entry": "autocheck autochk /q /v *",
+  "inventory_add(tool='Autorun_amd64', url='https://storage.googleapis.com/go.velocidex.com/autorunsc.exe', hash='083d7eee4ed40a3e5a35675503b0b6be0cb627b4cb1009d185a558a805f64153', filename='autorunsc_x64.exe')": {
+   "name": "Autorun_amd64",
+   "url": "https://storage.googleapis.com/go.velocidex.com/autorunsc.exe",
+   "github_project": "",
+   "github_asset_regex": "",
+   "serve_locally": false,
+   "admin_override": true,
+   "serve_url": "",
+   "serve_path": "",
+   "filestore_path": "",
+   "filename": "autorunsc_x64.exe",
+   "hash": "083d7eee4ed40a3e5a35675503b0b6be0cb627b4cb1009d185a558a805f64153",
+   "materialize": false
+  }
+ }
+]SELECT * FROM  Artifact.Windows.Sysinternals.Autoruns( AutorunArgs='-nobanner -accepteula -a b -c *', ToolInfo=inventory_get(tool='Autorun_amd64')) WHERE Company =~ 'Microsoft'[
+ {
+  "﻿Time": "5/22/1991 7:17 AM",
   "Entry Location": "HKLM\\System\\CurrentControlSet\\Control\\Session Manager\\BootExecute",
-  "Image Path": "c:\\windows\\system32\\autochk.exe",
-  "Launch String": "autocheck autochk /q /v *",
-  "Profile": "System-wide",
-  "Version": "6.3.9600.17031",
-  "_Source": "Windows.Sysinternals.Autoruns",
-  "﻿Time": "2/22/2014 12:17 PM"
- },
- {
-  "Category": "Boot Execute",
-  "Company": "Microsoft Corporation",
-  "Description": "Service Control Manager Extension DLL for non-minwin",
+  "Entry": "autocheck autochk /q /v *",
   "Enabled": "enabled",
-  "Entry": "%systemroot%\\system32\\scext.dll",
-  "Entry Location": "HKLM\\System\\CurrentControlSet\\Control\\ServiceControlManagerExtension",
-  "Image Path": "c:\\windows\\system32\\scext.dll",
-  "Launch String": "%systemroot%\\system32\\scext.dll",
+  "Category": "Boot Execute",
   "Profile": "System-wide",
-  "Version": "6.3.9600.17415",
-  "_Source": "Windows.Sysinternals.Autoruns",
-  "﻿Time": "10/29/2014 1:28 AM"
+  "Description": "Auto Check Utility",
+  "Company": "Microsoft Corporation",
+  "Image Path": "c:\\windows\\system32\\autochk.exe",
+  "Version": "10.0.17763.1",
+  "Launch String": "autocheck autochk /q /v *",
+  "_Source": "Windows.Sysinternals.Autoruns"
  }
 ]

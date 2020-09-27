@@ -6,10 +6,12 @@ goog.module.declareLegacyNamespace();
 
 const {ApiItemsProviderDirective} = goog.require('grrUi.core.apiItemsProviderDirective');
 const {ApiService} = goog.require('grrUi.core.apiService');
+const {AceService} = goog.require('grrUi.core.aceService');
 const {ClockDirective} = goog.require('grrUi.core.clockDirective');
 const {CsvViewerDirective} = goog.require('grrUi.core.csvViewerDirective');
 const {ConfirmationDialogDirective} = goog.require('grrUi.core.confirmationDialogDirective');
 const {DialogService} = goog.require('grrUi.core.dialogService');
+const {FocusMeDirective} = goog.require('grrUi.core.focusMeDirective');
 const {ForceRefreshDirective} = goog.require('grrUi.core.forceRefreshDirective');
 const {GlobalNotificationsDirective} = goog.require('grrUi.core.globalNotificationsDirective');
 const {HexNumberFilter} = goog.require('grrUi.core.hexNumberFilter');
@@ -17,7 +19,6 @@ const {InfiniteTableDirective} = goog.require('grrUi.core.infiniteTableDirective
 const {LoadingIndicatorService} = goog.require('grrUi.core.loadingIndicatorService');
 const {PagedFilteredTableDirective, TableBottomDirective, TableTopDirective} = goog.require('grrUi.core.pagedFilteredTableDirective');
 const {PeriodicRefreshDirective} = goog.require('grrUi.core.periodicRefreshDirective');
-const {ReflectionService} = goog.require('grrUi.core.reflectionService');
 const {SearchBoxDirective} = goog.require('grrUi.core.searchBoxDirective');
 const {ErrorLabelDirective} = goog.require('grrUi.core.errorLabelDirective');
 const {ServerErrorButtonDirective} = goog.require('grrUi.core.serverErrorButtonDirective');
@@ -29,6 +30,8 @@ const {SplitterDirective, SplitterPaneDirective} = goog.require('grrUi.core.spli
 const {TimeService} = goog.require('grrUi.core.timeService');
 const {TimeSinceFilter} = goog.require('grrUi.core.timeSinceFilter');
 const {TimestampFilter} = goog.require('grrUi.core.timestampFilter');
+const {VqlHelpDirective} = goog.require('grrUi.core.vqlHelpDirective');
+const {InspectJsonDirective} = goog.require('grrUi.core.inspectJsonDirective');
 const {WizardFormDirective} = goog.require('grrUi.core.wizardFormDirective');
 const {WizardFormPageDirective} = goog.require('grrUi.core.wizardFormPageDirective');
 
@@ -38,13 +41,18 @@ const {WizardFormPageDirective} = goog.require('grrUi.core.wizardFormPageDirecti
  * Angular module for core GRR UI components.
  */
 exports.coreModule =
-    angular.module('grrUi.core', ['ngCookies', 'ui.bootstrap', 'datatables']);
+    angular.module('grrUi.core', ['ngCookies', 'ui.bootstrap', 'datatables',
+                                  'datatables.buttons', 'ui.ace',
+                                  'datatables.colreorder',
+                                  ]);
 
 
 exports.coreModule.directive(
     ApiItemsProviderDirective.directive_name, ApiItemsProviderDirective);
 exports.coreModule.directive(
     ForceRefreshDirective.directive_name, ForceRefreshDirective);
+exports.coreModule.directive(
+    FocusMeDirective.directive_name, FocusMeDirective);
 exports.coreModule.directive(
     PagedFilteredTableDirective.directive_name, PagedFilteredTableDirective);
 exports.coreModule.directive(
@@ -62,6 +70,10 @@ exports.coreModule.directive(
 exports.coreModule.directive(ClockDirective.directive_name, ClockDirective);
 exports.coreModule.directive(
     CsvViewerDirective.directive_name, CsvViewerDirective);
+exports.coreModule.directive(
+    VqlHelpDirective.directive_name, VqlHelpDirective);
+exports.coreModule.directive(
+    InspectJsonDirective.directive_name, InspectJsonDirective);
 exports.coreModule.directive(
     WizardFormDirective.directive_name, WizardFormDirective);
 exports.coreModule.directive(
@@ -81,7 +93,8 @@ exports.coreModule.directive(
 exports.coreModule.directive(
     GlobalNotificationsDirective.directive_name, GlobalNotificationsDirective);
 exports.coreModule.service(ApiService.service_name, ApiService);
-exports.coreModule.service(ReflectionService.service_name, ReflectionService);
+exports.coreModule.service(AceService.service_name, AceService);
+
 exports.coreModule.service(TimeService.service_name, TimeService);
 exports.coreModule.service(DialogService.service_name, DialogService);
 exports.coreModule.directive(

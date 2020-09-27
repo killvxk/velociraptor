@@ -1,4 +1,4 @@
-// +build windows
+// +build windows,amd64
 
 package process
 
@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"syscall"
 
+	"github.com/Velocidex/ordereddict"
 	"golang.org/x/sys/windows"
+	"www.velocidex.com/golang/velociraptor/acls"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -21,9 +23,16 @@ type TokenFunction struct{}
 func (self TokenFunction) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
+
+	err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
+	if err != nil {
+		scope.Log("token: %s", err)
+		return vfilter.Null{}
+	}
+
 	arg := &TokenArgs{}
-	err := vfilter.ExtractArgs(scope, args, arg)
+	err = vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
 		scope.Log("token: %s", err.Error())
 		return vfilter.Null{}
@@ -45,6 +54,7 @@ func (self TokenFunction) Call(
 		scope.Log("token: %s", err.Error())
 		return vfilter.Null{}
 	}
+	defer token.Close()
 
 	// Find the token user
 	tokenUser, err := token.GetTokenUser()
@@ -52,7 +62,6 @@ func (self TokenFunction) Call(
 		scope.Log("token: %s", err.Error())
 		return vfilter.Null{}
 	}
-	defer token.Close()
 
 	groups := []string{}
 	token_groups, err := token.GetTokenGroups()
@@ -63,7 +72,7 @@ func (self TokenFunction) Call(
 		}
 	}
 
-	result := vfilter.NewDict().
+	result := ordereddict.NewDict().
 		Set("Username", vfilter.Null{}).
 		Set("ProfileDir", vfilter.Null{}).
 		Set("IsElevated", token.IsElevated()).

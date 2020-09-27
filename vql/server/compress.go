@@ -23,7 +23,9 @@ import (
 	"compress/gzip"
 	"context"
 
-	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/artifacts"
 	"www.velocidex.com/golang/velociraptor/file_store"
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
@@ -38,16 +40,22 @@ type Compress struct{}
 
 func (self *Compress) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
+
+	err := vql_subsystem.CheckAccess(scope, acls.FILESYSTEM_WRITE)
+	if err != nil {
+		scope.Log("compress: %v", err)
+		return vfilter.Null{}
+	}
+
 	arg := &CompressArgs{}
-	err := vfilter.ExtractArgs(scope, args, arg)
+	err = vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
 		scope.Log("compress: %s", err.Error())
 		return vfilter.Null{}
 	}
 
-	any_config_obj, _ := scope.Resolve("server_config")
-	config_obj, ok := any_config_obj.(*config_proto.Config)
+	config_obj, ok := artifacts.GetServerConfig(scope)
 	if !ok {
 		scope.Log("Command can only run on the server")
 		return vfilter.Null{}

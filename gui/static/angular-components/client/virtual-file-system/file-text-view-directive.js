@@ -109,7 +109,7 @@ FileTextViewController.prototype.fetchText_ = function() {
   var total_size = this.fileContext.selectedRow['Size'];
   var offset = (this.page - 1) * this.chunkSize_;
 
-  var url = 'v1/DownloadVFSFile/' + clientId + '/' + filePath;
+  var url = 'v1/DownloadVFSFile';
   var params = {
     offset: offset,
     length: this.chunkSize_,
@@ -134,7 +134,7 @@ exports.FileTextViewDirective = function() {
     restrict: 'E',
     scope: {},
     require: '^grrFileContext',
-    templateUrl: '/static/angular-components/client/virtual-file-system/file-text-view.html',
+    templateUrl: window.base_path+'/static/angular-components/client/virtual-file-system/file-text-view.html',
     controller: FileTextViewController,
     controllerAs: 'controller',
     link: function(scope, element, attrs, fileContextController) {

@@ -23,6 +23,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -32,7 +33,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tink-ab/tempfile"
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/artifacts"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	constants "www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/utils"
@@ -52,13 +55,15 @@ var (
 type _HttpPluginRequest struct {
 	Url     string      `vfilter:"required,field=url,doc=The URL to fetch"`
 	Params  vfilter.Any `vfilter:"optional,field=params,doc=Parameters to encode as POST or GET query strings"`
-	Headers vfilter.Any `vfilter:"optional,field=headers.doc=A dict of headers to send."`
+	Headers vfilter.Any `vfilter:"optional,field=headers,doc=A dict of headers to send."`
 	Method  string      `vfilter:"optional,field=method,doc=HTTP method to use (GET, POST)"`
+	Data    string      `vfilter:"optional,field=data,doc=If specified we write this raw data into a POST request instead of encoding the params above."`
 	Chunk   int         `vfilter:"optional,field=chunk_size,doc=Read input with this chunk size and send each chunk as a row"`
 
 	// Sometimes it is useful to be able to query misconfigured hosts.
 	DisableSSLSecurity bool   `vfilter:"optional,field=disable_ssl_security,doc=Disable ssl certificate verifications."`
 	TempfileExtension  string `vfilter:"optional,field=tempfile_extension,doc=If specified we write to a tempfile. The content field will contain the full path to the tempfile."`
+	RemoveLast         bool   `vfilter:"optional,field=remove_last,doc=If set we delay removal as much as possible."`
 }
 
 type _HttpPluginResponse struct {
@@ -138,7 +143,7 @@ func getHttpClient(
 		arg.Url = "http://unix" + components[1]
 
 		return &http.Client{
-			Timeout: time.Second * 10,
+			Timeout: time.Second * 10000,
 			Transport: &http.Transport{
 				MaxIdleConnsPerHost: 10,
 				DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
@@ -157,7 +162,7 @@ func getHttpClient(
 		}
 
 		http_client_no_ssl = &http.Client{
-			Timeout: time.Second * 10,
+			Timeout: time.Second * 10000,
 			Transport: &http.Transport{
 				MaxIdleConns: 10,
 				TLSClientConfig: &tls.Config{
@@ -174,7 +179,7 @@ func getHttpClient(
 	}
 
 	http_client = &http.Client{
-		Timeout: time.Second * 10,
+		Timeout: time.Second * 10000,
 		Transport: &http.Transport{
 			Dial: (&net.Dialer{
 				KeepAlive: 600 * time.Second,
@@ -233,7 +238,7 @@ func encodeParams(arg *_HttpPluginRequest, scope *vfilter.Scope) *url.Values {
 func (self *_HttpPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	arg := &_HttpPluginRequest{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -252,14 +257,24 @@ func (self *_HttpPlugin) Call(
 	go func() {
 		defer close(output_chan)
 
-		any_config_obj, _ := scope.Resolve("config")
-		config_obj := any_config_obj.(*config_proto.ClientConfig)
+		err := vql_subsystem.CheckAccess(scope, acls.COLLECT_SERVER)
+		if err != nil {
+			scope.Log("http_client: %s", err)
+			return
+		}
+
+		config_obj, _ := artifacts.GetConfig(scope)
 
 		params := encodeParams(arg, scope)
 		client := getHttpClient(config_obj, arg)
-		req, err := http.NewRequest(
-			arg.Method, arg.Url,
-			strings.NewReader(params.Encode()))
+
+		data := arg.Data
+		if data == "" {
+			data = params.Encode()
+		}
+
+		req, err := http.NewRequestWithContext(
+			ctx, arg.Method, arg.Url, strings.NewReader(data))
 		if err != nil {
 			scope.Log("%s: %s", self.Name(), err.Error())
 			return
@@ -269,6 +284,24 @@ func (self *_HttpPlugin) Call(
 
 		req.Header.Set("User-Agent", constants.USER_AGENT)
 
+		// Set various headers
+		if arg.Headers != nil {
+			for _, member := range scope.GetMembers(arg.Headers) {
+				value, pres := scope.Associative(arg.Headers, member)
+				if pres {
+					lazy_v, ok := value.(vfilter.LazyExpr)
+					if ok {
+						value = lazy_v.Reduce()
+					}
+
+					str_value, ok := value.(string)
+					if ok {
+						req.Header.Set(member, str_value)
+					}
+				}
+			}
+		}
+
 		http_resp, err := client.Do(req)
 		if http_resp != nil {
 			defer http_resp.Body.Close()
@@ -277,11 +310,13 @@ func (self *_HttpPlugin) Call(
 		if err != nil {
 			scope.Log("http_client: Error %v while fetching %v",
 				err, arg.Url)
-
-			output_chan <- &_HttpPluginResponse{
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- &_HttpPluginResponse{
 				Url:      arg.Url,
 				Response: 500,
-				Content:  err.Error(),
+				Content:  err.Error()}:
 			}
 			return
 		}
@@ -292,16 +327,27 @@ func (self *_HttpPlugin) Call(
 		}
 
 		if arg.TempfileExtension != "" {
-			tmpfile, err := tempfile.TempFile("", "tmp", arg.TempfileExtension)
+
+			tmpfile, err := ioutil.TempFile("", "tmp*"+arg.TempfileExtension)
 			if err != nil {
 				scope.Log("http_client: %v", err)
 				return
 			}
 
-			scope.AddDestructor(func() {
-				scope.Log("tempfile: removing tempfile %v", tmpfile.Name())
-				os.Remove(tmpfile.Name())
-			})
+			if arg.RemoveLast {
+				root_any, pres := scope.Resolve(constants.SCOPE_ROOT)
+				if pres {
+					root, ok := root_any.(*vfilter.Scope)
+					if ok {
+						scope.Log("Adding global destructor for %v", tmpfile.Name())
+						root.AddDestructor(func() {
+							remove_tmpfile(tmpfile.Name(), scope)
+						})
+					}
+				}
+			} else {
+				scope.AddDestructor(func() { remove_tmpfile(tmpfile.Name(), scope) })
+			}
 
 			scope.Log("http_client: Downloading %v into %v",
 				arg.Url, tmpfile.Name())
@@ -316,7 +362,11 @@ func (self *_HttpPlugin) Call(
 			// emit it to the VQL engine.
 			tmpfile.Close()
 
-			output_chan <- response
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- response:
+			}
 
 			return
 		}
@@ -326,7 +376,11 @@ func (self *_HttpPlugin) Call(
 			n, err := io.ReadFull(http_resp.Body, buf)
 			if n > 0 {
 				response.Content = string(buf[:n])
-				output_chan <- response
+				select {
+				case <-ctx.Done():
+					return
+				case output_chan <- response:
+				}
 			}
 
 			if err == io.EOF {
@@ -355,8 +409,24 @@ func (self _HttpPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *v
 	return &vfilter.PluginInfo{
 		Name:    self.Name(),
 		Doc:     "Make a http request.",
-		RowType: type_map.AddType(scope, &_HttpPluginResponse{}),
 		ArgType: type_map.AddType(scope, &_HttpPluginRequest{}),
+	}
+}
+
+// Make sure the file is removed when the query is done.
+func remove_tmpfile(tmpfile string, scope *vfilter.Scope) {
+	scope.Log("tempfile: removing tempfile %v", tmpfile)
+
+	// On windows especially we can not remove files that
+	// are opened by something else, so we keep trying for
+	// a while.
+	for i := 0; i < 100; i++ {
+		err := os.Remove(tmpfile)
+		if err == nil {
+			break
+		}
+		utils.Debug(err)
+		time.Sleep(time.Second)
 	}
 }
 

@@ -3,7 +3,7 @@
 goog.module('grrUi.client.virtualFileSystem.breadcrumbsDirective');
 goog.module.declareLegacyNamespace();
 
-
+const {SplitPathComponents} = goog.require('grrUi.core.utils');
 
 /**
  * Controller for BreadcrumbsDirective.
@@ -55,7 +55,7 @@ BreadcrumbsController.prototype.onDirectiveArgsChange_ = function() {
     return;
   }
 
-  var components = pathArg.split('/');
+  var components = SplitPathComponents(pathArg);
   if (stripEndingSlashArg && pathArg.endsWith('/')) {
     components = components.slice(0, components.length - 1);
   }
@@ -108,7 +108,7 @@ exports.BreadcrumbsDirective = function() {
       // "foo/bar/folder" we want "foo > bar" breadcrumbs).
       stripEndingSlash: '='
     },
-    templateUrl: '/static/angular-components/client/virtual-file-system/breadcrumbs.html',
+    templateUrl: window.base_path+'/static/angular-components/client/virtual-file-system/breadcrumbs.html',
     controller: BreadcrumbsController,
     controllerAs: 'controller'
   };

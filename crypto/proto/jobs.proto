@@ -2,12 +2,13 @@
 // communication protocol.
 syntax = "proto3";
 
-import "www.velocidex.com/golang/velociraptor/proto/semantic.proto";
-import "www.velocidex.com/golang/velociraptor/actions/proto/hunts.proto";
-import "www.velocidex.com/golang/velociraptor/actions/proto/transport.proto";
-import "www.velocidex.com/golang/velociraptor/actions/proto/vql.proto";
+import "proto/semantic.proto";
+import "actions/proto/transport.proto";
+import "actions/proto/vql.proto";
 
 package proto;
+
+option go_package = "www.velocidex.com/golang/velociraptor/crypto/proto";
 
 // This message is sent between the client and the server.
 // Next field: 24
@@ -20,6 +21,10 @@ message GrrMessage {
       description: "The message is in response to this request number "
       "(requests increment from 1)."
     }];
+
+  // If this is set then the message is urgent - it will not be
+  // queued needlessly.
+  bool urgent = 36;
 
   uint64 response_id = 3 [(sem_type) = {
       description: "Responses for each request are also numbered from 1."
@@ -49,7 +54,8 @@ message GrrMessage {
 
   AuthorizationState auth_state = 7;
 
-  // The id of this message in the scheduler. Based on the timestamp.
+  // The id of this message in the scheduler. Based on the
+  // timestamp. If this is 0 then the task is not scheduled.
   uint64 task_id = 15;
 
   // Generally only one of the following will be set.
@@ -67,6 +73,10 @@ message GrrMessage {
   Cancel Cancel = 32;
   ForemanCheckin UpdateForeman = 35;
 
+  // Immediately kill the client and reset all buffers.
+  Cancel  KillKillKill = 38;
+
+
   // DEPRECATED: The following fields were used as part of the old
   // GrrMessage communication protocol. These fields were replaced
   // by the messages above.
@@ -79,6 +89,7 @@ message GrrMessage {
   // this value is in args_rdf_name.
   bytes args = 5;
 
+  // DEPRECATED:
   // The rdfvalue class of the args.
   string args_rdf_name = 14;
 
@@ -88,10 +99,10 @@ message GrrMessage {
     STATUS = 1; //
   };
 
+  // DEPRECATED:
   // The final response to a request carries this type which indicates it is a
   // status message.
   Type type = 8;
-
 };
 
 message Cancel {};
@@ -112,18 +123,20 @@ message Certificate {
 // This is a status response that is sent for each complete
 // transaction. It is always the last message in the transaction.
 message GrrStatus {
+    // Velociraptor only uses OK and GENERIC_ERROR right now.
+    enum ReturnedStatus {
+        OK = 0;
+        GENERIC_ERROR = 10;
+    };
 
-  // Velociraptor only uses OK and GENERIC_ERROR right now.
-  enum ReturnedStatus {
-    OK = 0;
-    GENERIC_ERROR = 10;
-  };
+    ReturnedStatus status = 1;
 
-  ReturnedStatus status = 1;
+    string error_message = 2;
 
-  string error_message = 2;
+    string backtrace = 3;
 
-  string backtrace = 3;
+    // Total duration the query took to run on the client.
+    int64 duration = 4;
 };
 
 // This is a list of job messages.
@@ -185,7 +198,7 @@ message CipherProperties {
     }];
 
   enum HMACType {
-    // DEPRECATED: Older clients use a HMAC only on the encrypted message.
+      // DEPRECATED: Older clients use a HMAC only on the encrypted message.
     SIMPLE_HMAC = 0;
 
     // Newer clients also include the encrypted cipher and API version in the
@@ -271,5 +284,9 @@ message LogMessage {
 // Message written to the data store with the PEM of the client's
 // public key.
 message PublicKey {
-  bytes pem = 1;
+    bytes pem = 1;
+
+    // The timestamp when the key was saved (the client
+    // enrolled). This is used to deduce the first_seen_time.
+    uint64 enroll_time = 2;
 }

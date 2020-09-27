@@ -26,28 +26,31 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 // The algorithm in this file is based on the Rekall algorithm here:
 // https://github.com/google/rekall/blob/master/rekall-core/rekall/plugins/response/files.py#L255
 
-type TimeVal struct {
-	Sec  int64 `json:"sec"`
-	Nsec int64 `json:"usec"`
-}
-
 type FileInfo interface {
-	os.FileInfo
+	Name() string
+	ModTime() time.Time
 	FullPath() string
-	Mtime() TimeVal
-	Ctime() TimeVal
-	Atime() TimeVal
+	Mtime() utils.TimeVal
+	Ctime() utils.TimeVal
+	Atime() utils.TimeVal
 	Data() interface{}
+	Size() int64
 
+	IsDir() bool
 	IsLink() bool
 	GetLink() (string, error)
+	Mode() os.FileMode
+	Sys() interface{}
 }
 
 type ReadSeekCloser interface {
@@ -181,7 +184,7 @@ func (self *Globber) _brace_expansion(pattern string, result *[]string) {
 		for _, item := range middle {
 			self._brace_expansion(left+item+right, result)
 		}
-	} else if !utils.InString(result, pattern) {
+	} else if !utils.InString(*result, pattern) {
 		*result = append(*result, pattern)
 	}
 }
@@ -246,7 +249,9 @@ func is_dir_or_link(f FileInfo, accessor FileSystemAccessor, depth int) bool {
 // version uses a context to allow cancellation. We write the FileInfo
 // into the output channel.
 func (self Globber) ExpandWithContext(
-	ctx context.Context, root string,
+	ctx context.Context,
+	config_obj *config_proto.Config,
+	root string,
 	accessor FileSystemAccessor) <-chan FileInfo {
 	output_chan := make(chan FileInfo)
 
@@ -264,6 +269,9 @@ func (self Globber) ExpandWithContext(
 		// level.
 		files, err := accessor.ReadDir(root)
 		if err != nil {
+			logging.GetLogger(config_obj, &logging.GenericComponent).
+				Debug("Globber.ExpandWithContext: %v while processing %v",
+					err, root)
 			return
 		}
 
@@ -304,25 +312,29 @@ func (self Globber) ExpandWithContext(
 				result[j].FullPath())
 		})
 		for _, f := range result {
-			output_chan <- f
-		}
-
-		for next_path, nexts := range children {
 			select {
 			case <-ctx.Done():
 				return
 
-			default:
-				for _, next := range nexts {
-					// There is no point expanding this
-					// node if it is just a sentinal -
-					// special case it for efficiency.
-					if is_sentinal(next) {
-						continue
-					}
-					for f := range next.ExpandWithContext(
-						ctx, next_path, accessor) {
-						output_chan <- f
+			case output_chan <- f:
+			}
+		}
+
+		for next_path, nexts := range children {
+			for _, next := range nexts {
+				// There is no point expanding this
+				// node if it is just a sentinal -
+				// special case it for efficiency.
+				if is_sentinal(next) {
+					continue
+				}
+				for f := range next.ExpandWithContext(
+					ctx, config_obj, next_path, accessor) {
+					select {
+					case <-ctx.Done():
+						return
+
+					case output_chan <- f:
 					}
 				}
 			}
@@ -392,9 +404,7 @@ func (self Globber) _expand_path_components(filter []_PathFilterer, depth int) e
 
 	// If we get here the new_filter should be clean and
 	// need no expansions.
-	self._add_filter(new_filter)
-
-	return nil
+	return self._add_filter(new_filter)
 }
 
 var (
@@ -413,7 +423,7 @@ var (
 // literal component.
 // We also support recursion into directories using the ** notation.  For
 // example, /home/**2/foo.txt will find all files named foo.txt recursed 2
-// directories deep. If the directory depth is omitted, it defaults to 3.
+// directories deep. If the directory depth is omitted, it defaults to 30.
 
 // Example:
 // /home/test**/*exe -> [{path: 'home', type: "LITERAL",

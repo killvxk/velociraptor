@@ -16,27 +16,30 @@ parameters:
     description: Only upload these artifacts to elastic
   - name: elasticAddresses
     default: http://127.0.0.1:9200/
+  - name: Username
+  - name: Password
+  - name: APIKey
 
 sources:
   - queries:
       - LET completions = SELECT * FROM watch_monitoring(
              artifact="System.Flow.Completion")
-             WHERE Flow.FlowContext.artifacts_with_results =~ ArtifactNameRegex
+             WHERE Flow.artifacts_with_results =~ ArtifactNameRegex
 
       - LET documents = SELECT * FROM foreach(row=completions,
           query={
-             SELECT * FROM for(
-                 var="ArtifactWithResults",
-                 in=Flow.FlowContext.artifacts_with_results,
+             SELECT * FROM foreach(
+                 row=Flow.artifacts_with_results,
                  query={
-                     SELECT *, ArtifactWithResults AS Artifact,
+                     SELECT *, _value AS Artifact,
                             timestamp(epoch=now()) AS timestamp,
-                            ClientId, basename(path=Flow.Urn) AS FlowId,
-                            "artifact_" + ArtifactWithResults as _index
+                            ClientId, Flow.session_id AS FlowId,
+                            "artifact_" + regex_replace(source=_value,
+                               re='[/.]', replace='_') as _index
                      FROM source(
                         client_id=ClientId,
-                        flow_id=basename(path=Flow.Urn),
-                        artifact=ArtifactWithResults)
+                        flow_id=Flow.session_id,
+                        artifact=_value)
                  })
           })
 
@@ -44,4 +47,7 @@ sources:
             query=documents,
             addresses=split(string=elasticAddresses, sep=","),
             index="velociraptor",
+            password=Password,
+            username=Username,
+            api_key=APIKey,
             type="artifact")

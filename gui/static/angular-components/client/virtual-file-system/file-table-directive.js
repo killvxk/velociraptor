@@ -5,6 +5,7 @@ goog.module.declareLegacyNamespace();
 
 const {getFolderFromPath} = goog.require('grrUi.client.virtualFileSystem.utils');
 const {REFRESH_FOLDER_EVENT} = goog.require('grrUi.client.virtualFileSystem.events');
+const {PathJoin} = goog.require('grrUi.core.utils');
 
 var OPERATION_POLL_INTERVAL_MS = 1000;
 
@@ -61,6 +62,16 @@ const FileTableController = function(
     this.scope_.$watch('controller.fileContext.selectedDirPath',
                        this.onDirPathChange_.bind(this));
 
+    this.uiTraits = {};
+    this.grrApiService_.getCached('v1/GetUserUITraits').then(function(response) {
+        this.uiTraits = response.data['interface_traits'];
+    }.bind(this), function(error) {
+        if (error['status'] == 403) {
+            this.error = 'Authentication Error';
+        } else {
+            this.error = error['statusText'] || ('Error');
+        }
+    }.bind(this));
 };
 
 FileTableController.prototype.setMode_ = function() {
@@ -68,7 +79,7 @@ FileTableController.prototype.setMode_ = function() {
         return;
     }
 
-    var path = this.fileContext.selectedDirPath.replace(/\/+/, "");
+    var path = this.fileContext.selectedDirPath;
     // Viewing the server files VFS
     if (this.fileContext.clientId == "") {
         this.mode = "server";
@@ -95,7 +106,7 @@ FileTableController.prototype.setMode_ = function() {
 FileTableController.prototype.showHelp = function() {
     var self = this;
     self.modalInstance = self.uibModal_.open({
-        templateUrl: '/static/angular-components/client/virtual-file-system/help.html',
+        templateUrl: window.base_path+'/static/angular-components/client/virtual-file-system/help.html',
         scope: self.scope_,
         size: "lg",
     });
@@ -122,8 +133,8 @@ FileTableController.prototype.onDirPathChange_ = function(newValue, oldValue) {
 FileTableController.prototype.onSelectedRowChange_ = function(newValue, oldValue) {
   if (angular.isDefined(newValue) && angular.isDefined(newValue.Name)) {
     if (angular.isDefined(this.fileContext.selectedDirPath)) {
-      this.fileContext.selectedFilePath = this.fileContext.selectedDirPath +
-        "/" + newValue.Name;
+        this.fileContext.selectedFilePath = PathJoin(
+            this.fileContext.selectedDirPath, newValue.Name);
     }
   }
 };
@@ -142,41 +153,44 @@ FileTableController.prototype.startVfsRefreshOperation = function() {
     var clientId = this.fileContext['clientId'];
     var selectedDirPath = this.fileContext['selectedDirPath'];
 
-    var url = 'v1/VFSRefreshDirectory/' + clientId;
+    var url = 'v1/VFSRefreshDirectory';
     var params = {
+        client_id: clientId,
         vfs_path: selectedDirPath,
         depth: 0,
     };
 
-    // Setting this.lastRefreshOperationId means that the update button
-    // will get disabled immediately.
-    this.lastRefreshOperationId = 'unknown';
-    this.grrApiService_.post(url, params)
-        .then(
-            function success(response) {
-                this.lastRefreshOperationId = response.data['flow_id'];
-                var pollPromise = this.grrApiService_.poll(
-                    'v1/GetFlowDetails/' + clientId,
-                    OPERATION_POLL_INTERVAL_MS, {
-                        flow_id: this.lastRefreshOperationId,
-                    }, function(response) {
-                        if (response.data.context.state != 'RUNNING') {
-                            this.lastRefreshOperationId = undefined;
-                            return true;
-                        };
-                        return false;
-                    }.bind(this));
-                this.scope_.$on('$destroy', function() {
-                    this.grrApiService_.cancelPoll(pollPromise);
-                }.bind(this));
+  // Setting this.lastRefreshOperationId means that the update button
+  // will get disabled immediately.
+  this.lastRefreshOperationId = 'unknown';
+  this.grrApiService_.post(url, params)
+    .then(
+      function success(response) {
+        this.lastRefreshOperationId = response.data['flow_id'];
+        var pollPromise = this.grrApiService_.poll(
+          'v1/VFSStatDirectory',
+          OPERATION_POLL_INTERVAL_MS, {
+            vfs_path: selectedDirPath,
+            client_id: clientId,
+            flow_id: this.lastRefreshOperationId,
+          }, function(response) {
+            if (response.data.flow_id == this.lastRefreshOperationId) {
+              this.lastRefreshOperationId = undefined;
+              return true;
+            };
+            return false;
+          }.bind(this));
+        this.scope_.$on('$destroy', function() {
+          this.grrApiService_.cancelPoll(pollPromise);
+        }.bind(this));
 
-                return pollPromise;
-            }.bind(this))
-        .then(
-            function success() {
-                this.rootScope_.$broadcast(
-                    REFRESH_FOLDER_EVENT, selectedDirPath);
-            }.bind(this));
+        return pollPromise;
+      }.bind(this))
+    .then(
+        function success() {
+            this.rootScope_.$broadcast(
+                REFRESH_FOLDER_EVENT, selectedDirPath);
+        }.bind(this));
 };
 
 /**
@@ -188,7 +202,7 @@ exports.FileTableDirective = function() {
     restrict: 'E',
     scope: {},
     require: '^grrFileContext',
-    templateUrl: '/static/angular-components/client/virtual-file-system/file-table.html',
+    templateUrl: window.base_path+'/static/angular-components/client/virtual-file-system/file-table.html',
     controller: FileTableController,
     controllerAs: 'controller',
     link: function(scope, element, attrs, fileContextController) {

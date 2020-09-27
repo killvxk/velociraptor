@@ -27,7 +27,11 @@ const HuntClientsController = function($scope) {
 
 HuntClientsController.prototype.onContextChange_ = function(newValues, oldValues) {
     if (newValues != oldValues || this.pageData == null) {
-        this.params = {path: "hunts/" + this.scope_.huntId + ".csv"};
+        this.params = {
+            hunt_id: this.scope_.huntId,
+            type: "clients",
+            path: this.scope_.huntId,
+        };
     }
 };
 
@@ -44,7 +48,7 @@ exports.HuntClientsDirective = function() {
       huntId: '='
     },
     restrict: 'E',
-    templateUrl: '/static/angular-components/hunt/hunt-clients.html',
+    templateUrl: window.base_path+'/static/angular-components/hunt/hunt-clients.html',
     controller: HuntClientsController,
     controllerAs: 'controller'
   };

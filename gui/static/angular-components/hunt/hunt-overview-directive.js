@@ -3,8 +3,6 @@
 goog.module('grrUi.hunt.huntOverviewDirective');
 goog.module.declareLegacyNamespace();
 
-var ERROR_EVENT_NAME = 'ServerError';
-
 /**
  * Controller for HuntOverviewDirective.
  *
@@ -20,8 +18,26 @@ const HuntOverviewController = function($scope, grrApiService) {
     this.scope_.hunt;
 
     this.grrApiService_ = grrApiService;
+
+    this.uiTraits = {};
+    this.grrApiService_.getCached('v1/GetUserUITraits').then(function(response) {
+        this.uiTraits = response.data['interface_traits'];
+    }.bind(this), function(error) {
+        if (error['status'] == 403) {
+            this.error = 'Authentication Error';
+        } else {
+            this.error = error['statusText'] || ('Error');
+        }
+    }.bind(this));
 };
 
+HuntOverviewController.prototype.huntState = function(item) {
+    if (item.stats.stopped) {
+        return "STOPPED";
+    }
+
+    return item.state;
+};
 
 
 /**
@@ -29,26 +45,27 @@ const HuntOverviewController = function($scope, grrApiService) {
  *
  * @export
  */
-HuntOverviewController.prototype.downloadFile = function() {
-    var url = 'v1/DownloadHuntResults';
+HuntOverviewController.prototype.prepareDownload = function(download_type) {
     var hunt = this.scope_["hunt"];
-    if (angular.isDefined(hunt)) {
-        var params = {hunt_id: hunt.hunt_id};
-        this.grrApiService_.downloadFile(url, params).then(
-            function success() {}.bind(this),
-            function failure(response) {
-                if (angular.isUndefined(response.status)) {
-                    this.rootScope_.$broadcast(
-                        ERROR_EVENT_NAME, {
-                            message: 'Couldn\'t download file.'
-                        });
-                }
-            }.bind(this)
-        );
+    var url = 'v1/CreateDownload';
+    var params = {
+        hunt_id: hunt.hunt_id,
+    };
+
+    if (download_type == 'summary') {
+        params.only_combined_hunt = true;
+    } else if(download_type == 'summary-json') {
+        params.only_combined_hunt = true;
+        params.json_format = true;
+    } else if(download_type == 'summary-csv') {
+        params.only_combined_hunt = true;
+        params.csv_format = true;
     }
+
+    this.grrApiService_.post(url, params).then(
+        function success() {}.bind(this),
+    );
 };
-
-
 
 /**
  * Directive for displaying log records of a hunt with a given URN.
@@ -63,7 +80,7 @@ exports.HuntOverviewDirective = function() {
       hunt: '=',
     },
     restrict: 'E',
-    templateUrl: '/static/angular-components/hunt/hunt-overview.html',
+    templateUrl: window.base_path+'/static/angular-components/hunt/hunt-overview.html',
     controller: HuntOverviewController,
     controllerAs: 'controller'
   };

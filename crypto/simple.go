@@ -5,7 +5,6 @@ import (
 	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"sync"
 
 	errors "github.com/pkg/errors"
@@ -47,7 +46,7 @@ func (self *Obfuscator) Encrypt(config_obj *config_proto.Config, name string) (
 }
 
 func (self *Obfuscator) generateCrypter(config_obj *config_proto.Config) error {
-	hash := sha256.Sum256([]byte(config_obj.Frontend.PrivateKey))
+	hash := sha256.Sum256([]byte(config_obj.ObfuscationNonce))
 	self.key = hash[:]
 	crypter, err := aes.NewCipher(self.key)
 	if err != nil {
@@ -68,7 +67,6 @@ func (self *Obfuscator) Decrypt(config_obj *config_proto.Config, name string) (
 
 	// Not obfuscated
 	if name[0] != '$' {
-		fmt.Printf("Name %s is not obfuscated\n", name)
 		return name, nil
 	}
 

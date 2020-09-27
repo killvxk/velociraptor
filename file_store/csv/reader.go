@@ -71,7 +71,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -79,6 +78,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"www.velocidex.com/golang/velociraptor/json"
 )
 
 // A ParseError is returned for parsing errors.
@@ -243,11 +244,13 @@ func (r *Reader) ReadAny() ([]interface{}, error) {
 		if strings.HasPrefix(item, "base64:") {
 			value, err := base64.StdEncoding.DecodeString(item[7:])
 			if err != nil {
-				return nil, err
+				record[i] = item
+				continue
 			}
 			record[i] = value
 			continue
 		}
+		// Ambiguous strings include a space at the front.
 		if strings.HasPrefix(item, " ") {
 			record[i] = item[1:]
 			continue
@@ -256,8 +259,13 @@ func (r *Reader) ReadAny() ([]interface{}, error) {
 		if strings.HasPrefix(item, "{") {
 			value := make(map[string]interface{})
 			err := json.Unmarshal([]byte(item), &value)
+			// Its not really a json object - just include
+			// it as a string (this might happen when
+			// parsing CSV files not produced by
+			// Velociraptor).
 			if err != nil {
-				return nil, err
+				record[i] = item
+				continue
 			}
 			record[i] = value
 			continue
@@ -267,8 +275,11 @@ func (r *Reader) ReadAny() ([]interface{}, error) {
 		if strings.HasPrefix(item, "[") {
 			value := []interface{}{}
 			err := json.Unmarshal([]byte(item), &value)
+			// Its not really a json object - just include
+			// it as a string.
 			if err != nil {
-				return nil, err
+				record[i] = item
+				continue
 			}
 			record[i] = value
 			continue
@@ -294,10 +305,16 @@ func (r *Reader) ReadAny() ([]interface{}, error) {
 	return record, nil
 }
 
-func (r *Reader) Seek(offset int64) {
-	r.raw_reader.Seek(offset, io.SeekStart)
+func (r *Reader) Seek(offset int64) error {
+	_, err := r.raw_reader.Seek(offset, io.SeekStart)
+	if err != nil {
+		return err
+	}
+
 	r.r = bufio.NewReader(r.raw_reader)
 	r.ByteOffset = offset
+
+	return nil
 }
 
 // ReadAll reads all the remaining records from r.

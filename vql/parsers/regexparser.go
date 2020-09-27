@@ -21,11 +21,24 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sync"
 
+	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/glob"
 	utils "www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
+)
+
+const BUFF_SIZE = 40960
+
+var (
+	pool = sync.Pool{
+		New: func() interface{} {
+			buffer := make([]byte, BUFF_SIZE)
+			return &buffer
+		},
+	}
 )
 
 type _ParseFileWithRegexArgs struct {
@@ -45,7 +58,13 @@ func _ParseFile(
 	arg *_ParseFileWithRegexArgs,
 	output_chan chan vfilter.Row) {
 
-	accessor, err := glob.GetAccessor(arg.Accessor, ctx)
+	err := vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+	if err != nil {
+		scope.Log("parse_records_with_regex: %s", err)
+		return
+	}
+
+	accessor, err := glob.GetAccessor(arg.Accessor, scope)
 	if err != nil {
 		scope.Log("error: %v", err)
 		return
@@ -58,7 +77,11 @@ func _ParseFile(
 	}
 	defer file.Close()
 
-	buffer := make([]byte, 40960)
+	cached_buffer := pool.Get().(*[]byte)
+	defer pool.Put(cached_buffer)
+
+	buffer := *cached_buffer
+
 	for {
 		n, _ := file.Read(buffer)
 		if n == 0 {
@@ -70,7 +93,7 @@ func _ParseFile(
 			if match != nil {
 				names := r.SubexpNames()
 				for _, hit := range match {
-					row := vfilter.NewDict().Set(
+					row := ordereddict.NewDict().Set(
 						"FullPath", filename)
 					for _, name := range arg.capture_vars {
 						if name != "" {
@@ -89,7 +112,12 @@ func _ParseFile(
 
 						row.Set(key, string(submatch))
 					}
-					output_chan <- row
+					select {
+					case <-ctx.Done():
+						return
+
+					case output_chan <- row:
+					}
 				}
 			}
 		}
@@ -101,7 +129,7 @@ func _ParseFile(
 func (self _ParseFileWithRegex) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	arg := &_ParseFileWithRegexArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -124,7 +152,7 @@ func (self _ParseFileWithRegex) Call(
 		// make sure the result row has something in each
 		// position to avoid errors.
 		for _, x := range r.SubexpNames() {
-			if !utils.InString(&arg.capture_vars, x) && x != "" {
+			if !utils.InString(arg.capture_vars, x) && x != "" {
 				arg.capture_vars = append(arg.capture_vars, x)
 			}
 		}
@@ -158,14 +186,14 @@ type _ParseStringWithRegexFunction struct{}
 
 func (self *_ParseStringWithRegexFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) (result vfilter.Any) {
+	args *ordereddict.Dict) (result vfilter.Any) {
 	arg := &_ParseStringWithRegexFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
 		scope.Log("parse_string_with_regex: %s", err.Error())
 		return vfilter.Null{}
 	}
-	row := vfilter.NewDict()
+	row := ordereddict.NewDict()
 	merged_names := []string{}
 	for _, regex := range arg.Regex {
 		r, err := regexp.Compile("(?i)" + regex)
@@ -178,7 +206,7 @@ func (self *_ParseStringWithRegexFunction) Call(ctx context.Context,
 		if match != nil {
 			names := r.SubexpNames()
 			for _, x := range names {
-				if !utils.InString(&merged_names, x) && x != "" {
+				if !utils.InString(merged_names, x) && x != "" {
 					merged_names = append(merged_names, x)
 				}
 			}
@@ -228,7 +256,7 @@ type _RegexReplace struct{}
 func (self _RegexReplace) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &_RegexReplaceArg{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {

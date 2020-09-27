@@ -3,14 +3,15 @@ package common
 import (
 	"context"
 
+	"github.com/Velocidex/ordereddict"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
 
 type ForPluginArgs struct {
-	Var   string              `vfilter:"required,field=var,doc=The variable to assign."`
-	In    vfilter.Any         `vfilter:"required,field=in,doc=The variable to iterate over."`
-	Query vfilter.StoredQuery `vfilter:"optional,field=query,doc=Run this query over the item."`
+	Var     string              `vfilter:"required,field=var,doc=The variable to assign."`
+	Foreach vfilter.LazyExpr    `vfilter:"required,field=foreach,doc=The variable to iterate over."`
+	Query   vfilter.StoredQuery `vfilter:"optional,field=query,doc=Run this query over the item."`
 }
 
 type ForPlugin struct{}
@@ -18,7 +19,7 @@ type ForPlugin struct{}
 func (self ForPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
@@ -31,27 +32,23 @@ func (self ForPlugin) Call(
 			return
 		}
 
-		// Expand lazy expressions.
-		lazy_v, ok := arg.In.(vfilter.LazyExpr)
-		if ok {
-			arg.In = lazy_v.Reduce()
-		}
+		scope.Log("The for() plugin is deprecated. Please use foreach() instead.")
 
 		// Force the in parameter to be a query.
-		stored_query, ok := arg.In.(vfilter.StoredQuery)
-		if !ok {
-			wrapper := vfilter.StoredQueryWrapper{arg.In}
-			stored_query = &wrapper
-		}
-
+		stored_query := arg.Foreach.ToStoredQuery(scope)
 		for item := range stored_query.Eval(ctx, scope) {
 			// Evaluate the query on the new value
 			new_scope := scope.Copy()
-			new_scope.AppendVars(vfilter.NewDict().Set(
+			new_scope.AppendVars(ordereddict.NewDict().Set(
 				arg.Var, item))
 
 			for item := range arg.Query.Eval(ctx, new_scope) {
-				output_chan <- item
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- item:
+				}
 			}
 		}
 

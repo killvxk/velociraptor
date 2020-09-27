@@ -27,28 +27,81 @@
 package vql
 
 import (
+	"sync"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"www.velocidex.com/golang/vfilter"
 )
 
 var (
-	exportedPlugins      []vfilter.PluginGeneratorInterface
+	exportedPlugins      = make(map[string]vfilter.PluginGeneratorInterface)
 	exportedProtocolImpl []vfilter.Any
-	exportedFunctions    []vfilter.FunctionInterface
+	exportedFunctions    = make(map[string]vfilter.FunctionInterface)
+
+	scopeCounter = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "vql_make_scope",
+		Help: "Total number of Scope objects constructed.",
+	})
 )
 
 func RegisterPlugin(plugin vfilter.PluginGeneratorInterface) {
-	exportedPlugins = append(exportedPlugins, plugin)
+	name := plugin.Info(nil, nil).Name
+	_, pres := exportedPlugins[name]
+	if pres {
+		panic("Multiple plugins defined")
+	}
+
+	exportedPlugins[name] = plugin
 }
 
 func RegisterFunction(plugin vfilter.FunctionInterface) {
-	exportedFunctions = append(exportedFunctions, plugin)
+	name := plugin.Info(nil, nil).Name
+	_, pres := exportedFunctions[name]
+	if pres {
+		panic("Multiple plugins defined")
+	}
+
+	exportedFunctions[name] = plugin
 }
 
 func RegisterProtocol(plugin vfilter.Any) {
 	exportedProtocolImpl = append(exportedProtocolImpl, plugin)
 }
 
+func GetFunction(name string) (vfilter.FunctionInterface, bool) {
+	res, pres := exportedFunctions[name]
+	return res, pres
+}
+
+var (
+	mu sync.Mutex
+
+	// Instead of building the scope from scratch each time, use a
+	// global scope and prepare any other scopes from it.
+	globalScope *vfilter.Scope
+)
+
+func _makeRootScope() *vfilter.Scope {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if globalScope == nil {
+		globalScope = MakeNewScope()
+	}
+
+	return globalScope.NewScope()
+}
+
 func MakeScope() *vfilter.Scope {
+	return _makeRootScope()
+}
+
+// MakeNewScope makes a new scope from scratch. You do not need to use
+// this! use MakeScope() above which is much faster.
+func MakeNewScope() *vfilter.Scope {
+	scopeCounter.Inc()
+
 	result := vfilter.NewScope()
 	for _, plugin := range exportedPlugins {
 		result.AppendPlugins(plugin)
@@ -61,8 +114,6 @@ func MakeScope() *vfilter.Scope {
 	for _, function := range exportedFunctions {
 		result.AppendFunctions(function)
 	}
-
-	result.SetContext("", "")
 
 	return result
 }

@@ -23,14 +23,19 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Velocidex/ordereddict"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
 
 type ArrayFunction struct{}
 
-func flatten(ctx context.Context, scope *vfilter.Scope, a vfilter.Any) []vfilter.Any {
+func flatten(ctx context.Context, scope *vfilter.Scope, a vfilter.Any, depth int) []vfilter.Any {
 	var result []vfilter.Any
+
+	if depth > 4 {
+		return result
+	}
 
 	switch t := a.(type) {
 	case vfilter.LazyExpr:
@@ -44,7 +49,7 @@ func flatten(ctx context.Context, scope *vfilter.Scope, a vfilter.Any) []vfilter
 			if len(members) == 1 {
 				row, _ = scope.Associative(row, members[0])
 			}
-			flattened := flatten(ctx, scope, row)
+			flattened := flatten(ctx, scope, row, depth+1)
 			result = append(result, flattened...)
 		}
 		return result
@@ -56,7 +61,7 @@ func flatten(ctx context.Context, scope *vfilter.Scope, a vfilter.Any) []vfilter
 	if a_type.Kind() == reflect.Slice {
 		for i := 0; i < a_value.Len(); i++ {
 			element := a_value.Index(i).Interface()
-			flattened := flatten(ctx, scope, element)
+			flattened := flatten(ctx, scope, element, depth+1)
 
 			result = append(result, flattened...)
 		}
@@ -68,7 +73,8 @@ func flatten(ctx context.Context, scope *vfilter.Scope, a vfilter.Any) []vfilter
 		for _, item := range members {
 			value, pres := scope.Associative(a, item)
 			if pres {
-				result = append(result, flatten(ctx, scope, value)...)
+				result = append(result, flatten(
+					ctx, scope, value, depth+1)...)
 			}
 		}
 
@@ -80,8 +86,8 @@ func flatten(ctx context.Context, scope *vfilter.Scope, a vfilter.Any) []vfilter
 
 func (self *ArrayFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
-	return flatten(ctx, scope, args)
+	args *ordereddict.Dict) vfilter.Any {
+	return flatten(ctx, scope, args, 0)
 }
 
 func (self ArrayFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
@@ -100,7 +106,7 @@ type JoinFunction struct{}
 
 func (self *JoinFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 
 	arg := &JoinFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -125,14 +131,14 @@ func (self JoinFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *
 }
 
 type FilterFunctionArgs struct {
-	List  []string `vfilter:"required,field=list,doc=A list of items too filter"`
+	List  []string `vfilter:"required,field=list,doc=A list of items to filter"`
 	Regex []string `vfilter:"required,field=regex,doc=A regex to test each item"`
 }
 type FilterFunction struct{}
 
 func (self *FilterFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &FilterFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -170,8 +176,50 @@ func (self FilterFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap)
 	}
 }
 
+type LenFunctionArgs struct {
+	List vfilter.Any `vfilter:"required,field=list,doc=A list of items too filter"`
+}
+type LenFunction struct{}
+
+func (self *LenFunction) Call(ctx context.Context,
+	scope *vfilter.Scope,
+	args *ordereddict.Dict) vfilter.Any {
+	arg := &LenFunctionArgs{}
+	err := vfilter.ExtractArgs(scope, args, arg)
+	if err != nil {
+		scope.Log("len: %s", err.Error())
+		return &vfilter.Null{}
+	}
+
+	slice := reflect.ValueOf(arg.List)
+	// A slice of strings. Only the following are supported
+	// https://golang.org/pkg/reflect/#Value.Len
+	if slice.Type().Kind() == reflect.Slice ||
+		slice.Type().Kind() == reflect.Map ||
+		slice.Type().Kind() == reflect.Array ||
+		slice.Type().Kind() == reflect.String {
+		return slice.Len()
+	}
+
+	dict, ok := arg.List.(*ordereddict.Dict)
+	if ok {
+		return dict.Len()
+	}
+
+	return 0
+}
+
+func (self LenFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+	return &vfilter.FunctionInfo{
+		Name:    "len",
+		Doc:     "Returns the length of an object.",
+		ArgType: type_map.AddType(scope, &LenFunctionArgs{}),
+	}
+}
+
 func init() {
 	vql_subsystem.RegisterFunction(&FilterFunction{})
 	vql_subsystem.RegisterFunction(&ArrayFunction{})
 	vql_subsystem.RegisterFunction(&JoinFunction{})
+	vql_subsystem.RegisterFunction(&LenFunction{})
 }

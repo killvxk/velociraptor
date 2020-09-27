@@ -3,71 +3,82 @@
 goog.module('grrUi.artifact.serverEventsDirective');
 
 const ServerEventsController = function($scope, $uibModal, grrApiService) {
-  /** @private {!angular.Scope} */
-  this.scope_ = $scope;
+    /** @private {!angular.Scope} */
+    this.scope_ = $scope;
 
-  this.uibModal_ = $uibModal;
-  this.grrApiService_ = grrApiService;
+    this.uibModal_ = $uibModal;
+    this.grrApiService_ = grrApiService;
 
-  this.artifacts = [];
-  this.selectedArtifact = {};
+    this.artifacts = [];
+    this.selectedArtifact = {};
 
-  this.names = [];
-  this.params = {};
+    this.names = [];
+    this.params = {};
 
-  this.flowArguments = {};
+    this.flowArguments = {};
 
-  this.opened = false;
-  this.reportParams;
+    this.opened = false;
+    this.reportParams;
 
-  // Start off with the time rounded to the current day.
-  this.selected_date;
+    // Start off with the time rounded to the current day.
+    this.selected_date;
 
-  this.dateOptions = {
-    formatYear: 'yy',
-    startingDay: 1,
-    dateDisabled: function(dateAndMode) {
-      var timestamp_start = 0;
-      var timestamp_end = 0;
-      var utc;
+    this.dateOptions = {
+        formatYear: 'yy',
+        startingDay: 1,
+        dateDisabled: function(dateAndMode) {
+            var timestamp_start = 0;
+            var timestamp_end = 0;
+            var utc;
 
-      if (dateAndMode.mode == "day") {
-        // This is a hack! popup date time has to use local
-        // timezone. We therefore convert it to utc.
-        utc = moment(dateAndMode.date).format("YYYY-MM-DD");
-        timestamp_start = moment.utc(utc + "T00:00:00").unix();
-        timestamp_end = moment.utc(utc + "T23:59:59").unix();
-      } else if(dateAndMode.mode == "month") {
-        utc = moment(dateAndMode.date).format("YYYY-MM-");
-        timestamp_start = moment.utc(utc + "01T00:00:00").unix();
-        timestamp_end = moment.utc(utc + "30T23:59:59").unix();
-      } else {
-        utc = moment(dateAndMode.date).format("YYYY-");
-        timestamp_start = moment.utc(utc + "01-01T00:00:00").unix();
-        timestamp_end = moment.utc(utc + "12-30T23:59:59").unix();
-      };
+            if (dateAndMode.mode == "day") {
+                // This is a hack! popup date time has to use local
+                // timezone. We therefore convert it to utc.
+                utc = moment(dateAndMode.date).format("YYYY-MM-DD");
+                timestamp_start = moment.utc(utc + "T00:00:00").unix();
+                timestamp_end = moment.utc(utc + "T23:59:59").unix();
+            } else if(dateAndMode.mode == "month") {
+                utc = moment(dateAndMode.date).format("YYYY-MM-");
+                timestamp_start = moment.utc(utc + "01T00:00:00").unix();
+                timestamp_end = moment.utc(utc + "30T23:59:59").unix();
+            } else {
+                utc = moment(dateAndMode.date).format("YYYY-");
+                timestamp_start = moment.utc(utc + "01-01T00:00:00").unix();
+                timestamp_end = moment.utc(utc + "12-30T23:59:59").unix();
+            };
 
-      var timestamps = this.selectedArtifact.timestamps;
-      if (angular.isDefined(timestamps.length)) {
-        for (var i=0; i<timestamps.length; i++) {
-          var ts = timestamps[i];
-          if (ts >= timestamp_start && ts <= timestamp_end) {
-            return false;
-          }
+            var timestamps = this.selectedArtifact.timestamps;
+            if (angular.isArray(timestamps) && timestamps.length) {
+                for (var i=0; i<timestamps.length; i++) {
+                    var ts = timestamps[i];
+                    if (ts >= timestamp_start && ts <= timestamp_end) {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }.bind(this),
+    };
+
+    this.scope_.$watch('controller.selected_date',
+                       this.onDateChange.bind(this));
+    this.GetArtifactList();
+
+    this.uiTraits = {};
+    this.grrApiService_.getCached('v1/GetUserUITraits').then(function(response) {
+        this.uiTraits = response.data['interface_traits'];
+    }.bind(this), function(error) {
+        if (error['status'] == 403) {
+            this.error = 'Authentication Error';
+        } else {
+            this.error = error['statusText'] || ('Error');
         }
-      }
-
-      return true;
-    }.bind(this),
-  };
-
-  this.scope_.$watch('controller.selected_date',
-                     this.onDateChange.bind(this));
-  this.GetArtifactList();
+    }.bind(this));
 };
 
 ServerEventsController.prototype.onDateChange = function() {
-  if (!angular.isDefined(this.selected_date)) {
+  if (!angular.isObject(this.selected_date)) {
     return;
   }
 
@@ -81,12 +92,26 @@ ServerEventsController.prototype.onDateChange = function() {
 };
 
 ServerEventsController.prototype.GetArtifactList = function() {
-  var url = 'v1/ListAvailableEventResults';
-  var params = {};
-  return this.grrApiService_.get(url, params).then(
-    function(response) {
-      this.artifacts = response.data;
-    }.bind(this));
+    var url = 'v1/ListAvailableEventResults';
+    var params = {};
+    return this.grrApiService_.post(url, params).then(
+        function(response) {
+            // Hide internal events.
+            var filter = new RegExp("Server.Internal");
+            var available_result = [];
+            for (var i=0; i<response.data.logs.length; i++) {
+                var artifact = response.data.logs[i];
+                if (!angular.isObject(artifact)) {
+                    continue;
+                }
+                var name = artifact.artifact;
+                if (angular.isString(name) && !name.match(filter)) {
+                    available_result.push(artifact);
+                }
+            }
+
+            this.artifacts = available_result;
+      }.bind(this));
 };
 
 
@@ -95,21 +120,21 @@ ServerEventsController.prototype.openDatePicker = function() {
 };
 
 ServerEventsController.prototype.selectArtifact = function(artifact) {
-  this.selectedArtifact = artifact;
-  this.selected_date = null;
+    this.selectedArtifact = artifact;
+    this.selected_date = null;
 
-  if (artifact.timestamps.length > 0) {
-    var last_timestamp = artifact.timestamps[artifact.timestamps.length-1];
-    this.selected_date = new Date(last_timestamp * 1000);
-  }
+    if (angular.isArray(artifact.timestamps) && artifact.timestamps.length > 0) {
+        var last_timestamp = artifact.timestamps[artifact.timestamps.length-1];
+        this.selected_date = new Date(last_timestamp * 1000);
+    }
 
-  return false;
+    return false;
 };
 
 ServerEventsController.prototype.showHelp = function() {
     var self = this;
     self.modalInstance = self.uibModal_.open({
-        templateUrl: '/static/angular-components/client/virtual-file-system/help.html',
+        templateUrl: window.base_path+'/static/angular-components/client/virtual-file-system/help.html',
         scope: self.scope_,
         size: "lg",
     });
@@ -125,16 +150,16 @@ ServerEventsController.prototype.updateServerMonitoringTable = function() {
     this.grrApiService_.get(url).then(function(response) {
         self.flowArguments = response['data'];
         if (angular.isObject(self.flowArguments.artifacts)) {
-            self.names = self.flowArguments.artifacts.names || [];
+            self.names = self.flowArguments.artifacts || [];
             self.params = {};
-            var parameters = self.flowArguments.parameters.env || {};
+            var parameters = self.flowArguments.parameters.env || [];
             for (var i=0; i<parameters.length;i++) {
                 var p = parameters[i];
                 self.params[p["key"]] = p["value"];
             }
         }
         self.modalInstance = self.uibModal_.open({
-            templateUrl: '/static/angular-components/artifact/add_server_monitoring.html',
+            templateUrl: window.base_path+'/static/angular-components/artifact/add_server_monitoring.html',
             scope: self.scope_,
             size: "lg",
         });
@@ -153,7 +178,7 @@ ServerEventsController.prototype.saveServerArtifacts = function() {
         }
     }
 
-    self.flowArguments.artifacts = {names: self.names};
+    self.flowArguments.artifacts = self.names;
     self.flowArguments.parameters = {env: env};
 
     var url = 'v1/SetServerMonitoringState';
@@ -185,7 +210,7 @@ exports.ServerEventsDirective = function() {
       "artifact": '=',
     },
     restrict: 'E',
-    templateUrl: '/static/angular-components/artifact/server-events.html',
+    templateUrl: window.base_path+'/static/angular-components/artifact/server-events.html',
     controller: ServerEventsController,
     controllerAs: 'controller'
   };

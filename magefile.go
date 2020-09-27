@@ -48,7 +48,7 @@ var (
 	mingw_xcompiler_32 = "i686-w64-mingw32-gcc"
 	name               = "velociraptor"
 	version            = "v" + constants.VERSION
-	base_tags          = " release server_vql extras "
+	base_tags          = " server_vql extras "
 )
 
 type Builder struct {
@@ -104,10 +104,37 @@ func (self *Builder) Env() map[string]string {
 	return env
 }
 
+// Make sure the correct version of the syso file is present. If we
+// are building for non windows platforms we need to remove it
+// completely.
+func (self Builder) ensureSyso() error {
+	sh.Rm("bin/rsrc.syso")
+
+	if self.goos == "windows" {
+		switch self.arch {
+		case "386":
+			err := sh.Copy("bin/rsrc.syso", "docs/rsrc_386.syso")
+			if err != nil {
+				return err
+			}
+		case "amd64":
+			err := sh.Copy("bin/rsrc.syso", "docs/rsrc_amd64.syso")
+			if err != nil {
+				return err
+			}
+
+		}
+	}
+
+	return nil
+}
+
 func (self Builder) Run() error {
 	if err := os.Mkdir("output", 0700); err != nil && !os.IsExist(err) {
 		return fmt.Errorf("failed to create output: %v", err)
 	}
+
+	self.ensureSyso()
 
 	err := ensure_assets()
 	if err != nil {
@@ -129,13 +156,15 @@ func (self Builder) Run() error {
 
 func Auto() error {
 	return Builder{goos: runtime.GOOS,
-		filename: "velociraptor",
-		arch:     runtime.GOARCH}.Run()
+		filename:   "velociraptor",
+		extra_tags: " release yara ",
+		arch:       runtime.GOARCH}.Run()
 }
 
 func AutoDev() error {
 	return Builder{goos: runtime.GOOS,
 		arch:        runtime.GOARCH,
+		extra_tags:  " yara ",
 		filename:    "velociraptor",
 		extra_flags: []string{"-race"}}.Run()
 }
@@ -177,8 +206,27 @@ func Release() error {
 
 func Linux() error {
 	return Builder{
-		goos: "linux",
-		arch: "amd64"}.Run()
+		extra_tags: " release yara ",
+		goos:       "linux",
+		arch:       "amd64"}.Run()
+}
+
+func Aix() error {
+	return Builder{
+		extra_tags:  " release yara ",
+		goos:        "aix",
+		disable_cgo: true,
+		arch:        "ppc64",
+	}.Run()
+}
+
+func Arm() error {
+	return Builder{
+		extra_tags:  " release yara ",
+		goos:        "linux",
+		disable_cgo: true,
+		arch:        "arm",
+	}.Run()
 }
 
 // Builds a Development binary. This does not embed things like GUI
@@ -193,26 +241,46 @@ func Dev() error {
 // does not include tsan.
 func Windows() error {
 	return Builder{
-		goos: "windows",
-		arch: "amd64"}.Run()
+		extra_tags: " release yara ",
+		goos:       "windows",
+		arch:       "amd64"}.Run()
 }
 
 func WindowsDev() error {
 	return Builder{
-		goos:     "windows",
-		filename: "velociraptor.exe",
-		arch:     "amd64"}.Run()
+		goos:       "windows",
+		extra_tags: " release yara ",
+		filename:   "velociraptor.exe",
+		arch:       "amd64"}.Run()
+}
+
+func WindowsTest() error {
+	return Builder{
+		goos:        "windows",
+		disable_cgo: false,
+		extra_tags:  " release yara ",
+		filename:    "velociraptor.exe",
+		arch:        "amd64"}.Run()
 }
 
 func Windowsx86() error {
 	return Builder{
-		goos: "windows",
-		arch: "386"}.Run()
+		extra_tags: " release yara ",
+		goos:       "windows",
+		arch:       "386"}.Run()
 }
 
 func Darwin() error {
 	return Builder{goos: "darwin",
-		arch: "amd64"}.Run()
+		extra_tags: " release yara ",
+		arch:       "amd64"}.Run()
+}
+
+func DarwinBase() error {
+	return Builder{goos: "darwin",
+		extra_tags:  " release ",
+		disable_cgo: true,
+		arch:        "amd64"}.Run()
 }
 
 // Build step for Appveyor.
@@ -223,13 +291,16 @@ func Appveyor() error {
 	}
 
 	err = Builder{
-		goos:     "windows",
-		arch:     "amd64",
-		filename: "velociraptor.exe"}.Run()
+		goos:       "windows",
+		arch:       "amd64",
+		extra_tags: " release ",
+		filename:   "velociraptor.exe"}.Run()
 
 	if err != nil {
 		return err
 	}
+
+	return nil
 
 	// Build a linux binary on Appveyor without cgo. This is
 	// typically OK because it is mostly used for the server. It
@@ -237,6 +308,7 @@ func Appveyor() error {
 	return Builder{
 		goos:        "linux",
 		arch:        "amd64",
+		extra_tags:  " release ",
 		disable_cgo: true,
 		filename:    "velociraptor-linux.elf"}.Run()
 }
@@ -286,7 +358,7 @@ func hash() string {
 func fileb0x(asset string) error {
 	err := sh.Run("fileb0x", asset)
 	if err != nil {
-		err = sh.Run(mg.GoCmd(), "get", "github.com/UnnoTed/fileb0x")
+		err = sh.Run(mg.GoCmd(), "get", "github.com/Velocidex/fileb0x@d54f4040016051dd9657ce04d0ae6f31eab99bc6")
 		if err != nil {
 			return err
 		}

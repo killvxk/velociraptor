@@ -7,7 +7,9 @@ import (
 
 	"github.com/olekukonko/tablewriter"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
+	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -17,7 +19,7 @@ type TextTemplateEngine struct {
 }
 
 func (self *TextTemplateEngine) Execute(template_string string) (string, error) {
-	tmpl, err := self.tmpl.Parse(template_string)
+	tmpl, err := self.tmpl.Parse(SanitizeGoTemplates(template_string))
 	if err != nil {
 		return "", err
 	}
@@ -25,7 +27,6 @@ func (self *TextTemplateEngine) Execute(template_string string) (string, error) 
 	buffer := &bytes.Buffer{}
 	err = tmpl.Execute(buffer, nil)
 	if err != nil {
-		utils.Debug(err)
 		return "", err
 	}
 
@@ -41,8 +42,11 @@ func (self *TextTemplateEngine) Query(queries ...string) []vfilter.Row {
 			buf := &bytes.Buffer{}
 			err := t.Execute(buf, nil)
 			if err != nil {
-				self.logger.Err("Template Error (%s): %v",
-					self.Artifact.Name, err)
+				if self.Artifact != nil {
+					self.logger.Error(
+						"Template Error (%s): %v",
+						self.Artifact.Name, err)
+				}
 				return []vfilter.Row{}
 			}
 			query = buf.String()
@@ -50,12 +54,15 @@ func (self *TextTemplateEngine) Query(queries ...string) []vfilter.Row {
 
 		vql, err := vfilter.Parse(query)
 		if err != nil {
-			self.logger.Err("VQL Error while reporting %s: %v",
+			self.logger.Error("VQL Error while reporting %s: %v",
 				self.Artifact.Name, err)
 			return result
 		}
 
-		for row := range vql.Eval(context.Background(), self.Scope) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		for row := range vql.Eval(ctx, self.Scope) {
 			result = append(result, row)
 		}
 	}
@@ -108,10 +115,14 @@ func (self *TextTemplateEngine) Table(values ...interface{}) string {
 	return buffer.String()
 }
 
-func NewTextTemplateEngine(config_obj *config_proto.Config,
+func NewTextTemplateEngine(
+	config_obj *config_proto.Config,
+	scope *vfilter.Scope,
+	acl_manager vql_subsystem.ACLManager,
+	repository services.Repository,
 	artifact_name string) (*TextTemplateEngine, error) {
 	base_engine, err := newBaseTemplateEngine(
-		config_obj, artifact_name)
+		config_obj, scope, acl_manager, repository, artifact_name)
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +135,7 @@ func NewTextTemplateEngine(config_obj *config_proto.Config,
 			"Table":     template_engine.Table,
 			"LineChart": template_engine.LineChart,
 			"Get":       template_engine.getFunction,
+			"Expand":    template_engine.Expand,
 			"str":       strval,
 		})
 

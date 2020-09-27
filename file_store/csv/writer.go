@@ -7,7 +7,6 @@ package csv
 import (
 	"bufio"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
@@ -17,14 +16,19 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"www.velocidex.com/golang/velociraptor/json"
+
 	"www.velocidex.com/golang/vfilter"
 )
 
 var (
 	number_regex = regexp.MustCompile(
-		`^(?P<Number>[-+]?\d*\.?\d+([eE][-+]?\d+)?)$`)
+		`^(?i)(?P<Number>[-+]?\d*\.?\d+([eE][-+]?\d+)?)$`)
+
+	// Strings that look like this will be escaped because they
+	// might be confused with other things.
 	protected_prefix = regexp.MustCompile(
-		`^( |\{|\[|true|false|base64:)`)
+		`(?i)^( |\{|\[|true|false|[+-]?inf|base64:)`)
 )
 
 // A Writer writes records to a CSV encoded file.
@@ -83,7 +87,7 @@ func AnyToString(item vfilter.Any) string {
 		}
 
 	default:
-		serialized, err := json.MarshalIndent(item, "", " ")
+		serialized, err := json.MarshalIndent(item)
 		if err != nil {
 			return ""
 		}

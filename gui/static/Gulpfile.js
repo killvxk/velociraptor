@@ -23,7 +23,6 @@ var closureCompiler = gulpClosureCompiler.gulp();
 
 const closureCompilerFlags = {
     compilation_level: 'WHITESPACE_ONLY',
-  dependency_mode: 'STRICT',
   jscomp_off: [
     'checkTypes',
     'checkVars',
@@ -58,12 +57,10 @@ const closureCompilerFlags = {
  */
 gulp.task('compile-third-party-js', function() {
   return gulp.src([config.nodeModulesDir + '/jquery/dist/jquery.js',
-                   config.nodeModulesDir + '/jquery-migrate/dist/jquery-migrate.js',
-
+                   config.nodeModulesDir + '/popper.js/dist/umd/popper.min.js',
+                   // config.nodeModulesDir + '/jquery-migrate/dist/jquery-migrate.js',
                    config.nodeModulesDir + '/google-closure-library/closure/goog/base.js',
-
                    config.nodeModulesDir + '/bootstrap/dist/js/bootstrap.js',
-
                    config.nodeModulesDir + '/angular/angular.js',
                    config.nodeModulesDir + '/angular-animate/angular-animate.js',
                    config.nodeModulesDir + '/angular-cookies/angular-cookies.js',
@@ -73,14 +70,26 @@ gulp.task('compile-third-party-js', function() {
                    config.nodeModulesDir + '/moment/moment.js',
                    config.nodeModulesDir + '/angular-ui-bootstrap/dist/ui-bootstrap-tpls.js',
                    config.nodeModulesDir + '/angular-ui-router/release/angular-ui-router.js',
+                   config.nodeModulesDir + '/ng-sanitize/index.js',
+                   config.nodeModulesDir + '/ui-select/dist/select.min.js',
                    config.nodeModulesDir + '/datatables/media/js/jquery.dataTables.js',
                    config.nodeModulesDir + '/angular-datatables/dist/angular-datatables.js',
+                   config.nodeModulesDir + '/datatables.net-colreorder/js/dataTables.colReorder.js',
+                   config.nodeModulesDir + '/datatables.net-buttons/js/dataTables.buttons.js',
+                   config.nodeModulesDir + '/datatables.net-buttons/js/buttons.html5.js',
+                   config.nodeModulesDir + '/angular-datatables/dist/plugins/buttons/angular-datatables.buttons.js',
+                   config.nodeModulesDir + '/angular-datatables/dist/plugins/colreorder/angular-datatables.colreorder.js',
                    config.nodeModulesDir + '/angular-ui-ace/src/ui-ace.js',
-                   config.nodeModulesDir + '/ace-builds/src-noconflict/ace.js',
-                   config.nodeModulesDir + '/ace-builds/src-noconflict/ext-language_tools.js',
-                   config.nodeModulesDir + '/ace-builds/src-noconflict/theme-twilight.js',
-                   config.nodeModulesDir + '/ace-builds/src-noconflict/mode-yaml.js',
-                   config.nodeModulesDir + '/jquery-ui-dist/jquery-ui.js',
+                   config.nodeModulesDir + '/ace-builds/src-min-noconflict/ace.js',
+                   config.nodeModulesDir + '/ace-builds/src-min-noconflict/ext-*.js',
+                   config.nodeModulesDir + '/ace-builds/src-min-noconflict/theme-*.js',
+                   config.nodeModulesDir + '/ace-builds/src-min-noconflict/keybinding-*.js',
+                   config.nodeModulesDir + '/ace-builds/src-min-noconflict/mode-yaml.js',
+                   config.nodeModulesDir + '/ace-builds/src-min-noconflict/mode-json.js',
+                   config.nodeModulesDir + '/ace-builds/src-min-noconflict/mode-markdown.js',
+                   config.nodeModulesDir + '/ace-builds/src-min-noconflict/mode-sql.js',
+                   config.nodeModulesDir + '/ace-builds/src-min-noconflict/keybinding-emacs.js',
+                   config.nodeModulesDir + '/jquery-csv/src/jquery.csv.min.js',
                    config.nodeModulesDir + '/jstree/dist/jstree.js',
                    config.nodeModulesDir + '/moment/moment.js',
                    'third-party/jquery.splitter.js',
@@ -88,7 +97,7 @@ gulp.task('compile-third-party-js', function() {
                   ])
         .pipe(gulpNewer(config.distDir + '/third-party.bundle.js'))
         .pipe(gulpConcat('third-party.bundle.js'))
-        .pipe(uglify())
+        //.pipe(uglify())
         .pipe(gulp.dest(config.distDir));
 });
 
@@ -115,6 +124,8 @@ gulp.task('copy-jstree-theme', function() {
 gulp.task('copy-third-party-resources', function() {
   return gulp.src([config.nodeModulesDir + '/jstree-bootstrap-theme/dist/themes/proton/*.gif',
                    config.nodeModulesDir + '/jstree-bootstrap-theme/dist/themes/proton/*.png',
+                   // This file must be loaded outside the pack.
+                   config.nodeModulesDir + '/ace-builds/src-min-noconflict/worker-json.js',
                    config.nodeModulesDir + '/jstree-bootstrap-theme/dist/themes/proton/fonts/titillium/*.ttf',
                    config.nodeModulesDir + '/bootstrap/dist/css/bootstrap.css.map',
                    config.nodeModulesDir + '/bootstrap-sass/assets/fonts/bootstrap/glyphicons-halflings-regular.woff2'])
@@ -139,12 +150,11 @@ gulp.task('compile-third-party-css', function() {
     return gulp.src([config.nodeModulesDir + '/jstree-bootstrap-theme/dist/themes/proton/style.min.css',
                      config.nodeModulesDir + '/bootstrap/dist/css/bootstrap.css',
                      config.nodeModulesDir + '/angular-ui-bootstrap/dist/ui-bootstrap-csp.css',
+                     config.nodeModulesDir + '/ui-select/dist/select.min.css',
                      config.nodeModulesDir + '/font-awesome/css/font-awesome.css',
-                     config.nodeModulesDir + '/jquery-ui-dist/jquery-ui.css',
                      config.nodeModulesDir + '/angular-datatables/dist/css/angular-datatables.css',
                      config.nodeModulesDir + '/datatables/media/css/jquery.dataTables.css',
                      config.nodeModulesDir + '/vis/dist/vis.min.css',
-                     config.nodeModulesDir + '/jquery-ui-dist/jquery-ui.theme.css',
                      config.tempDir + '/grr-bootstrap.css',
                      'third-party/splitter.css'])
         .pipe(gulpNewer(config.distDir + '/third-party.bundle.css'))
@@ -154,27 +164,26 @@ gulp.task('compile-third-party-css', function() {
 
 gulp.task('compile-css', function() {
   return gulp.src([
-    'css/_variables.css',
-    'angular-components/sidebar/navigator.css',
-    'css/base.css',
-    'angular-components/artifact/reporting.css',
-    'angular-components/client/host-info.css',
-    'angular-components/client/virtual-file-system/breadcrumbs.css',
-    'angular-components/client/virtual-file-system/file-details.css',
-    'angular-components/client/virtual-file-system/file-hex-view.css',
-    'angular-components/client/virtual-file-system/file-text-view.css',
-    'angular-components/client/virtual-file-system/file-table.css',
-    'angular-components/core/global-notifications.css',
-    'angular-components/core/wizard-form.css',
-    'angular-components/forms/semantic-proto-form.css',
-    'angular-components/forms/semantic-proto-union-form.css',
-    'angular-components/sidebar/client-summary.css',
-    'angular-components/sidebar/client-warnings.css',
-    'angular-components/user/user-notification-item.css'
+      'css/_variables.css',
+      'angular-components/sidebar/navigator.css',
+      'css/base.css',
+      'angular-components/artifact/reporting.css',
+      'angular-components/client/host-info.css',
+      'angular-components/client/shell-cell.css',
+      'angular-components/client/virtual-file-system/breadcrumbs.css',
+      'angular-components/client/virtual-file-system/file-details.css',
+      'angular-components/client/virtual-file-system/file-hex-view.css',
+      'angular-components/client/virtual-file-system/file-text-view.css',
+      'angular-components/client/virtual-file-system/file-table.css',
+      'angular-components/core/global-notifications.css',
+      'angular-components/core/wizard-form.css',
+      'angular-components/sidebar/client-summary.css',
+      'angular-components/user/user-notification-item.css',
+      'angular-components/notebook/notebook.css',
   ])
-    .pipe(gulpNewer(config.distDir + '/grr-ui.bundle.css'))
-    .pipe(gulpConcat('grr-ui.bundle.css'))
-    .pipe(gulp.dest(config.distDir));
+        .pipe(gulpNewer(config.distDir + '/grr-ui.bundle.css'))
+        .pipe(gulpConcat('grr-ui.bundle.css'))
+        .pipe(gulp.dest(config.distDir));
 });
 
 
@@ -249,7 +258,6 @@ gulp.task('compile-third-party',
                       'compile-third-party-css',
                       'copy-third-party-resources',
                       'copy-jstree-theme',
-                      'copy-jquery-ui-images',
                       'copy-fontawesome-fonts',
                       'compile-third-party-bootstrap-css',
                       'compile-third-party-bootstrap-css'));

@@ -1,14 +1,16 @@
 <div class="padded" grr-force-refresh refresh-trigger="flowId">
 
-  <div ng-if="!flowId">
+  <div ng-if="!flowId" class="no-content">
     Please select a flow to see its details here.
   </div>
 
   <uib-tabset ng-if="flowId" active="controller.activeTab">
     <uib-tab heading="Artifact Collection" index="''">
       <grr-flow-overview flow="controller.flow"
-                         flow-id="flowId" api-base-path="apiBasePath"
-                         ng-if="controller.tabsShown['']" />
+                         flow-id="flowId"
+                         client-id="clientId"
+                         ng-if="controller.tabsShown['']">
+      </grr-flow-overview>
     </uib-tab>
 
     <uib-tab heading="Uploaded Files" index="'files'"
@@ -16,23 +18,12 @@
       <div class="card panel" >
         <h5 class="card-header">Files uploaded</h5>
         <div class="card-body">
-          <table datatable="ng"
-                 ng-if="controller.flow.context.uploaded_files.length"
-                 dt-instance="controller.dtInstance"
-                 dt-disable-deep-watchers="true"
-                 class="row-border hover dtable">
-            <thead><tr><th>Filename</th></tr></thead>
-            <tbody>
-              <tr ng-repeat="filename in controller.flow.context.uploaded_files track by $index">
-                <td>{$ filename $}</td>
-              </tr>
-            </tbody>
-          </table>
           <grr-csv-viewer
             ng-if="controller.flow.context.total_uploaded_files"
-            base-url="'v1/GetTable'"
-            params="controller.uploadedFilesParams"
-            />
+            renderers="{vfs_path:'VFS'}"
+            client-id="clientId"
+            params="controller.uploadedFilesParams">
+          </grr-csv-viewer>
         </div>
       </div>
     </uib-tab>
@@ -40,8 +31,10 @@
     <uib-tab heading="Requests" index="'requests'">
       <grr-flow-requests
         flow="controller.flow"
-        flow-id="flowId" api-base-path="apiBasePath"
-        ng-if="controller.tabsShown['requests']" />
+        flow-id="flowId"
+        client-id="clientId"
+        ng-if="controller.tabsShown['requests']">
+      </grr-flow-requests>
     </uib-tab>
 
     <uib-tab heading="Results" index="'results'">
@@ -49,24 +42,27 @@
         artifact-names="controller.flow.context.artifacts_with_results || controller.flow.context.artifacts"
         client-id="clientId"
         flow-id="flowId"
-        ng-if="controller.tabsShown['results']" />
+        ng-if="controller.tabsShown['results']">
+      </grr-flow-results>
     </uib-tab>
 
     <uib-tab heading="Log" index="'log'">
       <grr-flow-log
         flow="controller.flow"
         client-id="clientId"
-        flow-id="flowId" api-base-path="apiBasePath"
-        ng-if="controller.activeTab == 'log'" />
+        flow-id="flowId"
+        ng-if="controller.activeTab == 'log'">
+      </grr-flow-log>
     </uib-tab>
 
     <uib-tab heading="Reports" index="'reports'"
-             disable="!controller.flow.context.artifacts">
-      <grr-flow-report artifact-names="controller.flow.context.artifacts"
+             ng-if="false"
+             disable="!controller.flow.context.request.artifacts">
+      <grr-flow-report artifact-names="controller.flow.context.request.artifacts"
                        flow-id="flowId"
                        ng-if="controller.tabsShown['reports']"
-                       client-id="clientId"
-                       />
+                       client-id="clientId">
+      </grr-flow-report>
     </uib-tab>
   </uib-tabset>
 

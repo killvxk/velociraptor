@@ -18,18 +18,17 @@
 package logging
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
+	"regexp"
 	"sync"
 	"time"
 
 	rotatelogs "github.com/lestrrat-go/file-rotatelogs"
+	"github.com/mattn/go-isatty"
 	"github.com/pkg/errors"
 	"github.com/rifflock/lfshook"
 	"github.com/sirupsen/logrus"
@@ -38,6 +37,7 @@ import (
 
 var (
 	SuppressLogging = false
+	NoColor         = false
 
 	GenericComponent  = "Velociraptor"
 	FrontendComponent = "VelociraptorFrontend"
@@ -50,7 +50,52 @@ var (
 	Audit = "VelociraptorAudit"
 
 	Manager *LogManager
+
+	mu      sync.Mutex
+	prelogs []string
+
+	tag_regex         = regexp.MustCompile("<([^>/0]+)>")
+	closing_tag_regex = regexp.MustCompile("</>")
 )
+
+func InitLogging(config_obj *config_proto.Config) error {
+	Manager = &LogManager{
+		contexts: make(map[*string]*LogContext),
+	}
+
+	for _, component := range []*string{&GenericComponent,
+		&FrontendComponent, &ClientComponent,
+		&GUIComponent, &ToolComponent, &APICmponent, &Audit} {
+
+		logger, err := Manager.makeNewComponent(config_obj, component)
+		if err != nil {
+			return err
+		}
+		Manager.contexts[component] = logger
+	}
+
+	FlushPrelogs(config_obj)
+
+	return nil
+}
+
+// Early in the startup process, we find that we need to log sometimes
+// but we have no idea where to send the logs and what components to
+// load (because the config is not fully loaded yet). We therefore
+// queue these messages until we are able to flush them.
+func Prelog(format string, v ...interface{}) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	prelogs = append(prelogs, fmt.Sprintf(format, v...))
+}
+
+func FlushPrelogs(config_obj *config_proto.Config) {
+	logger := GetLogger(config_obj, &GenericComponent)
+	for _, msg := range prelogs {
+		logger.Info(msg)
+	}
+}
 
 type LogContext struct {
 	*logrus.Logger
@@ -68,7 +113,7 @@ func (self *LogContext) Warn(format string, v ...interface{}) {
 	self.Logger.Warn(fmt.Sprintf(format, v...))
 }
 
-func (self *LogContext) Err(format string, v ...interface{}) {
+func (self *LogContext) Error(format string, v ...interface{}) {
 	self.Logger.Error(fmt.Sprintf(format, v...))
 }
 
@@ -84,32 +129,30 @@ func (self *LogManager) GetLogger(
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
-	if !config_obj.Logging.SeparateLogsPerComponent {
+	if config_obj != nil &&
+		config_obj.Logging != nil &&
+		!config_obj.Logging.SeparateLogsPerComponent {
 		component = &GenericComponent
 	}
 
 	ctx, pres := self.contexts[component]
 	if !pres {
-		// Add a new context.
-		switch component {
-		case &GenericComponent,
-			&FrontendComponent, &ToolComponent, &Audit,
-			&ClientComponent, &GUIComponent, &APICmponent:
-
-			logger := self.makeNewComponent(config_obj, component)
-			if config_obj.Logging.SeparateLogsPerComponent {
-				self.contexts[component] = logger
-				return logger
-			} else {
-				self.contexts[&GenericComponent] = logger
-				return logger
-			}
-
-		default:
-			panic("Unsupported component!")
-		}
+		panic(fmt.Sprintf("Uninitialized logging for %v", *component))
 	}
 	return ctx
+}
+
+func (self *LogManager) Reset() {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	self.contexts = make(map[*string]*LogContext)
+}
+
+func Reset() {
+	if Manager != nil {
+		Manager.Reset()
+	}
 }
 
 func getRotator(
@@ -144,13 +187,18 @@ func getRotator(
 
 func (self *LogManager) makeNewComponent(
 	config_obj *config_proto.Config,
-	component *string) *LogContext {
+	component *string) (*LogContext, error) {
 
 	Log := logrus.New()
 	Log.Out = ioutil.Discard
 	Log.Level = logrus.DebugLevel
 
-	if config_obj.Logging.OutputDirectory != "" {
+	if config_obj != nil && config_obj.Logging != nil &&
+		config_obj.Logging.OutputDirectory != "" {
+		err := os.MkdirAll(config_obj.Logging.OutputDirectory, 0700)
+		if err != nil {
+			return nil, errors.New("Unable to create logging directory.")
+		}
 		base_filename := filepath.Join(
 			config_obj.Logging.OutputDirectory,
 			*component)
@@ -169,11 +217,14 @@ func (self *LogManager) makeNewComponent(
 
 		hook := lfshook.NewHook(
 			pathMap,
-			&logrus.JSONFormatter{},
+			&logrus.JSONFormatter{
+				DisableHTMLEscape: true,
+			},
 		)
 		Log.Hooks.Add(hook)
 	}
 
+	// Add stderr logging if required.
 	stderr_map := lfshook.WriterMap{
 		logrus.ErrorLevel: os.Stderr,
 	}
@@ -185,26 +236,36 @@ func (self *LogManager) makeNewComponent(
 		stderr_map[logrus.ErrorLevel] = os.Stderr
 	}
 
-	Log.Hooks.Add(lfshook.NewHook(stderr_map, &Formatter{}))
-
-	return &LogContext{Log}
-}
-
-type Formatter struct{}
-
-func (self *Formatter) Format(entry *logrus.Entry) ([]byte, error) {
-	b := &bytes.Buffer{}
-
-	levelText := strings.ToUpper(entry.Level.String())
-	fmt.Fprintf(b, "[%s] %v %s ", levelText, entry.Time.Format(time.RFC3339),
-		strings.TrimRight(entry.Message, "\r\n"))
-
-	if len(entry.Data) > 0 {
-		serialized, _ := json.Marshal(entry.Data)
-		fmt.Fprintf(b, "%s", serialized)
+	Log.Hooks.Add(lfshook.NewHook(stderr_map, &Formatter{stderr_map}))
+	if !NoColor && !isatty.IsTerminal(os.Stdout.Fd()) {
+		NoColor = true
 	}
 
-	return append(b.Bytes(), '\n'), nil
+	return &LogContext{Log}, nil
+}
+
+func AddLogFile(filename string) error {
+	fd, err := os.OpenFile(filename,
+		os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		return err
+	}
+
+	writer_map := lfshook.WriterMap{
+		logrus.ErrorLevel: fd,
+		logrus.DebugLevel: fd,
+		logrus.InfoLevel:  fd,
+		logrus.WarnLevel:  fd,
+	}
+
+	for _, log := range Manager.contexts {
+		log.Hooks.Add(lfshook.NewHook(
+			writer_map, &logrus.JSONFormatter{
+				DisableHTMLEscape: true,
+			},
+		))
+	}
+	return nil
 }
 
 type logWriter struct {
@@ -229,6 +290,12 @@ func NewPlainLogger(
 }
 
 func GetLogger(config_obj *config_proto.Config, component *string) *LogContext {
+	if Manager == nil {
+		err := InitLogging(config_obj)
+		if err != nil {
+			panic(err)
+		}
+	}
 	return Manager.GetLogger(config_obj, component)
 }
 
@@ -245,8 +312,8 @@ func GetStackTrace(err error) string {
 	return ""
 }
 
-func init() {
-	Manager = &LogManager{
-		contexts: make(map[*string]*LogContext),
-	}
+// Clear tags from log messages.
+func clearTag(message string) string {
+	message = tag_regex.ReplaceAllString(message, "")
+	return closing_tag_regex.ReplaceAllString(message, "")
 }

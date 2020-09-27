@@ -2,8 +2,8 @@ package common
 
 import (
 	"context"
-	"sort"
 
+	"github.com/Velocidex/ordereddict"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
@@ -12,7 +12,7 @@ type _SwitchPlugin struct{}
 
 func (self _SwitchPlugin) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
@@ -20,13 +20,12 @@ func (self _SwitchPlugin) Call(ctx context.Context,
 
 		queries := []vfilter.StoredQuery{}
 		members := scope.GetMembers(args)
-		sort.Strings(members)
 
 		for _, member := range members {
 			member_obj, _ := args.Get(member)
 			lazy_v, ok := member_obj.(vfilter.LazyExpr)
 			if ok {
-				member_obj = lazy_v.Reduce()
+				member_obj = lazy_v.ToStoredQuery(scope)
 			}
 
 			query, ok := member_obj.(vfilter.StoredQuery)
@@ -46,7 +45,12 @@ func (self _SwitchPlugin) Call(ctx context.Context,
 			new_scope := scope.Copy()
 			for item := range query.Eval(ctx, new_scope) {
 				found = true
-				output_chan <- item
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- item:
+				}
 			}
 
 			if found {

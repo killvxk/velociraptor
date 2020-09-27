@@ -23,23 +23,25 @@
 package filesystems
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/Velocidex/ordereddict"
 	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 	"www.velocidex.com/golang/velociraptor/glob"
+	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 )
 
 func ExtractI30List(accessor_ctx *AccessorContext,
 	mft_entry *ntfs.MFT_ENTRY, path string) []glob.FileInfo {
+
 	result := []glob.FileInfo{}
-	ntfs_ctx := accessor_ctx.ntfs_ctx
+	ntfs_ctx := accessor_ctx.GetNTFSContext()
 
 	var lru_map map[string]*cacheMFT
 	value, pres := accessor_ctx.path_listing.Get(path)
@@ -49,10 +51,6 @@ func ExtractI30List(accessor_ctx *AccessorContext,
 	} else {
 		lru_map = make(map[string]*cacheMFT)
 		for _, record := range mft_entry.Dir(ntfs_ctx) {
-			if !record.IsValid() {
-				continue
-			}
-
 			filename := record.File()
 			name_type := filename.NameType().Name
 			if name_type == "DOS" {
@@ -122,27 +120,21 @@ func (self *LazyNTFSFileInfo) ensureCachedInfo() {
 }
 
 func (self *LazyNTFSFileInfo) IsDir() bool {
-	if self.cached_info == nil {
-		self.ensureCachedInfo()
-	}
+	self.ensureCachedInfo()
 	return self.cached_info.IsDir
 
 	return true
 }
 
 func (self *LazyNTFSFileInfo) Size() int64 {
-	if self.cached_info == nil {
-		self.ensureCachedInfo()
-	}
+	self.ensureCachedInfo()
 	return self.cached_info.Size
 }
 
 func (self *LazyNTFSFileInfo) Data() interface{} {
-	if self.cached_info == nil {
-		self.ensureCachedInfo()
-	}
+	self.ensureCachedInfo()
 
-	result := vfilter.NewDict().
+	result := ordereddict.NewDict().
 		Set("mft", self.cached_info.MFTId).
 		Set("name_type", self.cached_info.NameType)
 	if self.cached_info.ExtraNames != nil {
@@ -169,9 +161,7 @@ func (self *LazyNTFSFileInfo) Mode() os.FileMode {
 }
 
 func (self *LazyNTFSFileInfo) ModTime() time.Time {
-	if self.cached_info == nil {
-		self.ensureCachedInfo()
-	}
+	self.ensureCachedInfo()
 	return self.cached_info.Mtime
 }
 
@@ -179,32 +169,26 @@ func (self *LazyNTFSFileInfo) FullPath() string {
 	return self._full_path
 }
 
-func (self *LazyNTFSFileInfo) Mtime() glob.TimeVal {
-	if self.cached_info == nil {
-		self.ensureCachedInfo()
-	}
+func (self *LazyNTFSFileInfo) Mtime() utils.TimeVal {
+	self.ensureCachedInfo()
 
-	return glob.TimeVal{
+	return utils.TimeVal{
 		Sec: self.cached_info.Mtime.Unix(),
 	}
 }
 
-func (self *LazyNTFSFileInfo) Ctime() glob.TimeVal {
-	if self.cached_info == nil {
-		self.ensureCachedInfo()
-	}
+func (self *LazyNTFSFileInfo) Ctime() utils.TimeVal {
+	self.ensureCachedInfo()
 
-	return glob.TimeVal{
+	return utils.TimeVal{
 		Sec: self.cached_info.Ctime.Unix(),
 	}
 }
 
-func (self *LazyNTFSFileInfo) Atime() glob.TimeVal {
-	if self.cached_info == nil {
-		self.ensureCachedInfo()
-	}
+func (self *LazyNTFSFileInfo) Atime() utils.TimeVal {
+	self.ensureCachedInfo()
 
-	return glob.TimeVal{
+	return utils.TimeVal{
 		Sec: self.cached_info.Atime.Unix(),
 	}
 }
@@ -218,40 +202,16 @@ func (self *LazyNTFSFileInfo) GetLink() (string, error) {
 	return "", errors.New("Not implemented")
 }
 
-func (self *LazyNTFSFileInfo) MarshalJSON() ([]byte, error) {
-	result, err := json.Marshal(&struct {
-		FullPath string
-		Size     int64
-		Mode     os.FileMode
-		ModeStr  string
-		ModTime  time.Time
-		Sys      interface{}
-		Mtime    glob.TimeVal
-		Ctime    glob.TimeVal
-		Atime    glob.TimeVal
-	}{
-		FullPath: self.FullPath(),
-		Size:     self.Size(),
-		Mode:     self.Mode(),
-		ModeStr:  self.Mode().String(),
-		ModTime:  self.ModTime(),
-		Sys:      self.Sys(),
-		Mtime:    self.Mtime(),
-		Ctime:    self.Ctime(),
-		Atime:    self.Atime(),
-	})
-
-	return result, err
-}
-
 type LazyNTFSFileSystemAccessor struct {
 	*NTFSFileSystemAccessor
 }
 
-func (self LazyNTFSFileSystemAccessor) New(ctx context.Context) glob.FileSystemAccessor {
-	return &LazyNTFSFileSystemAccessor{
-		NTFSFileSystemAccessor{}.New(ctx).(*NTFSFileSystemAccessor),
+func (self LazyNTFSFileSystemAccessor) New(scope *vfilter.Scope) (glob.FileSystemAccessor, error) {
+	base, err := NTFSFileSystemAccessor{}.New(scope)
+	if err != nil {
+		return nil, err
 	}
+	return &LazyNTFSFileSystemAccessor{base.(*NTFSFileSystemAccessor)}, nil
 }
 
 func (self *LazyNTFSFileSystemAccessor) ReadDir(path string) (res []glob.FileInfo, err error) {
@@ -298,7 +258,8 @@ func (self *LazyNTFSFileSystemAccessor) ReadDir(path string) (res []glob.FileInf
 		return nil, err
 	}
 
-	return ExtractI30List(accessor_ctx, dir, path), nil
+	result = ExtractI30List(accessor_ctx, dir, path)
+	return result, nil
 }
 
 func (self *LazyNTFSFileSystemAccessor) Open(path string) (res glob.ReadSeekCloser, err error) {
@@ -342,6 +303,12 @@ func (self *LazyNTFSFileSystemAccessor) Open(path string) (res glob.ReadSeekClos
 		return nil, err
 	}
 
+	reader, err := ntfs.OpenStream(ntfs_ctx, mft_entry,
+		128, data_attr.Attribute_id())
+	if err != nil {
+		return nil, err
+	}
+
 	return &readAdapter{
 		info: &LazyNTFSFileInfo{
 			mft_id:     int64(mft_entry.Record_number()),
@@ -349,9 +316,12 @@ func (self *LazyNTFSFileSystemAccessor) Open(path string) (res glob.ReadSeekClos
 			name:       components[len(components)-1],
 			_full_path: path,
 		},
-		reader: data_attr.Data(ntfs_ctx)}, nil
+		reader: reader,
+	}, nil
 }
 
 func init() {
 	glob.Register("lazy_ntfs", &LazyNTFSFileSystemAccessor{})
+
+	json.RegisterCustomEncoder(&LazyNTFSFileInfo{}, glob.MarshalGlobFileInfo)
 }

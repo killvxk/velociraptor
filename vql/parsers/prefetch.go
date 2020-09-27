@@ -4,8 +4,10 @@ import (
 	"context"
 	"io"
 
+	"github.com/Velocidex/ordereddict"
 	prefetch "www.velocidex.com/golang/go-prefetch"
 	"www.velocidex.com/golang/velociraptor/glob"
+	utils "www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
@@ -38,7 +40,7 @@ type _PrefetchPlugin struct{}
 func (self _PrefetchPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
@@ -53,7 +55,15 @@ func (self _PrefetchPlugin) Call(
 
 		for _, filename := range arg.Filenames {
 			func() {
-				accessor, err := glob.GetAccessor(arg.Accessor, ctx)
+				defer utils.RecoverVQL(scope)
+
+				err := vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+				if err != nil {
+					scope.Log("prefetch: %s", err)
+					return
+				}
+
+				accessor, err := glob.GetAccessor(arg.Accessor, scope)
 				if err != nil {
 					scope.Log("prefetch: %v", err)
 					return
@@ -80,7 +90,12 @@ func (self _PrefetchPlugin) Call(
 					return
 				}
 
-				output_chan <- prefetch_info
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- prefetch_info:
+				}
 			}()
 		}
 	}()
@@ -92,7 +107,7 @@ func (self _PrefetchPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap
 	return &vfilter.PluginInfo{
 		Name:    "prefetch",
 		Doc:     "Parses a prefetch file.",
-		ArgType: type_map.AddType(scope, &_PrefetchPlugin{}),
+		ArgType: type_map.AddType(scope, &_PrefetchPluginArgs{}),
 	}
 }
 

@@ -34,7 +34,9 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
+	"github.com/Velocidex/ordereddict"
 	"github.com/mattn/go-pointer"
+	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
@@ -84,8 +86,12 @@ func cert_walker(cert *C.char, len C.int,
 
 	result := pointer.Restore(unsafe.Pointer(ctx)).(*certContext)
 	for _, c := range certificates {
+		if c == nil || c.SerialNumber == nil {
+			continue
+		}
 		cert_context := &CertContext{
-			c, string(utf16.Decode(store_name))}
+			Certificate: c,
+			Store:       string(utf16.Decode(store_name))}
 
 		result.Certs = append(result.Certs, cert_context)
 	}
@@ -146,8 +152,14 @@ func (self *CertContext) HexSerialNumber() string {
 }
 
 func runCertificates(scope *vfilter.Scope,
-	args *vfilter.Dict) []vfilter.Row {
+	args *ordereddict.Dict) []vfilter.Row {
 	var result []vfilter.Row
+
+	err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
+	if err != nil {
+		scope.Log("certificates: %s", err)
+		return result
+	}
 
 	// The context is passed to the cert walker.
 	ctx := &certContext{}

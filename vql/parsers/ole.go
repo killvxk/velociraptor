@@ -18,15 +18,17 @@
 package parsers
 
 import (
-	"archive/zip"
 	"context"
 	"errors"
 	"io"
 	"io/ioutil"
 
+	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/oleparse"
 	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/glob"
+	"www.velocidex.com/golang/velociraptor/third_party/zip"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
@@ -45,7 +47,15 @@ func _OLEVBAPlugin_ParseFile(
 	scope *vfilter.Scope,
 	arg *_OLEVBAArgs) ([]*oleparse.VBAModule, error) {
 
-	accessor, err := glob.GetAccessor(arg.Accessor, ctx)
+	defer utils.RecoverVQL(scope)
+
+	err := vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+	if err != nil {
+		scope.Log("olevba: %s", err)
+		return nil, err
+	}
+
+	accessor, err := glob.GetAccessor(arg.Accessor, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +83,19 @@ func _OLEVBAPlugin_ParseFile(
 	}
 
 	if string(signature) == oleparse.OLE_SIGNATURE {
-		fd.Seek(0, io.SeekStart)
+		// If the underlying file is not seekable we open it
+		// again.
+		_, err = fd.Seek(0, io.SeekStart)
+		if err != nil {
+			fd.Close()
+
+			fd, err = accessor.Open(filename)
+			if err != nil {
+				return nil, err
+			}
+			defer fd.Close()
+		}
+
 		data, err := ioutil.ReadAll(io.LimitReader(fd, constants.MAX_MEMORY))
 		if err != nil {
 			return nil, err
@@ -112,7 +134,7 @@ func _OLEVBAPlugin_ParseFile(
 func (self _OLEVBAPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
@@ -133,8 +155,13 @@ func (self _OLEVBAPlugin) Call(
 			}
 
 			for _, macro_info := range macros {
-				output_chan <- vql_subsystem.RowToDict(scope, macro_info).Set(
-					"filename", filename)
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- vfilter.RowToDict(ctx, scope, macro_info).Set(
+					"filename", filename):
+				}
 			}
 		}
 	}()

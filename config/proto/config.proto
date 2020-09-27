@@ -1,16 +1,18 @@
 // These are the messages used in client actions.
 syntax = "proto3";
 
-import "www.velocidex.com/golang/velociraptor/proto/semantic.proto";
-import "www.velocidex.com/golang/velociraptor/actions/proto/vql.proto";
-import "www.velocidex.com/golang/velociraptor/artifacts/proto/artifact.proto";
+import "proto/semantic.proto";
+import "actions/proto/vql.proto";
+import "artifacts/proto/artifact.proto";
 
 package proto;
+
+option go_package = "www.velocidex.com/golang/velociraptor/config/proto";
 
 // Information about Velociraptor. This is a psuedo config item - it
 // will never be read from config files, but can be used in VQL
 // queries. It will be written to config files as metadata about the
-// version read from.
+// version that produced the config file.
 message Version {
     string name = 1 [(sem_type) = {
             description: "The client's name."
@@ -50,7 +52,10 @@ message Writeback {
     VQLEventTable event_queries = 1;
 }
 
-// Configuration for the windows installer.
+// Configuration for the windows installer. NOTE: This is not used
+// much - it is only used when running `velociraptor service
+// install`. We typically use an MSI to deploy (see the docs/wix/
+// directory).
 message WindowsInstallerConfig {
     string service_name = 1 [(sem_type) = {
             description: "The name of the service to create."
@@ -76,6 +81,8 @@ message DarwinInstallerConfig {
 }
 
 message RingBufferConfig {
+    string filename = 3 [deprecated = true];
+
     uint64 memory_size = 1 [(sem_type) = {
        description: "How many bytes to store in the ring buffer in memory."
     }];
@@ -84,9 +91,18 @@ message RingBufferConfig {
        description: "How many bytes to store in the ring buffer on disk (0 mean no disk file)."
     }];
 
-    string filename = 3 [(sem_type) = {
+    string filename_linux = 4 [(sem_type) = {
        description: "Name of file to store the ring buffer in (if empty we do not use a file)."
     }];
+
+    string filename_windows = 5 [(sem_type) = {
+       description: "Name of file to store the ring buffer in (if empty we do not use a file)."
+    }];
+
+    string filename_darwin = 6 [(sem_type) = {
+       description: "Name of file to store the ring buffer in (if empty we do not use a file)."
+    }];
+
 }
 
 message ClientConfig {
@@ -117,6 +133,15 @@ message ClientConfig {
     string writeback_windows = 10 [(sem_type) = {
             description: "A path where windows clients will write local state."
         }];
+
+    // A path to set the temp directory. If not set we use the system
+    // default. The path may be relative to the current directory
+    // (usually the location of the executable). If the path does not
+    // exist we fall back to the system temp directory.
+    string tempdir_linux = 1;
+    string tempdir_windows = 2;
+    string tempdir_darwin = 3;
+
 
     uint64 max_poll = 15 [(sem_type) = {
             description: "The maximum number of seconds between server polls."
@@ -165,9 +190,14 @@ message ClientConfig {
     RingBufferConfig local_buffer = 26 [(sem_type) = {
              description: "Configure the local ring buffer."
         }];
+
+    uint64 max_memory_hard_limit = 29;
 }
 
 message APIConfig {
+    // Publically accessible hostname.
+    string hostname = 5;
+
     string bind_address = 1 [(sem_type) = {
             description: "Address to bind gRPC endpoint. This should usually only be 127.0.0.1, otherwise be sure to properly secure it."
         }];
@@ -210,11 +240,45 @@ message ApiClientConfig {
     string name = 5 [(sem_type) = {
             description: "The CommonName for this API client.",
         }];
+
+    string pinned_server_name = 6;
 }
 
 message GUILink {
     string text = 1;
     string url = 2;
+}
+
+message Authenticator {
+    string type = 1;
+
+    // OAuth2 Authenticator (Google, Github, Azure etc).
+    string oauth_client_id = 5 [(sem_type) = {
+            description: "If set we use oauth authentication flow.",
+        }];
+    string oauth_client_secret = 6 [(sem_type) = {
+            description: "If set we use oauth authentication flow.",
+        }];
+
+    // Azure requires a tenancy as well.
+    string tenant = 7;
+
+    // SAML Authenticator
+    string saml_certificate = 12 [(sem_type) = {
+            description: "SAML certificate."
+        }];
+    string saml_private_key = 13 [(sem_type) = {
+            description: "SAML private key."
+        }];
+    string saml_idp_metadata_url = 14 [(sem_type) = {
+            description: "SAML identity provider metadata URL."
+        }];
+    string saml_root_url = 15 [(sem_type) = {
+            description: "SAML root URL."
+        }];
+    string saml_user_attribute = 16 [(sem_type) = {
+            description: "SAML attribute containing value for user identification."
+        }];
 }
 
 message GUIConfig {
@@ -225,6 +289,15 @@ message GUIConfig {
     uint32 bind_port = 2 [(sem_type) = {
             description: "Port to bind to."
         }];
+
+    // Allows the GUI to start with no encryption - **WARNING** This
+    // only makes sense if you have TLS proxy in front. In fact the
+    // GUI **will not work** without a TLS proxy because the csrf
+    // cookie is set to secure only.
+    bool use_plain_http = 20;
+
+    // Serve the GUI from this base path instead of "/"
+    string base_path = 21;
 
     string gw_certificate = 10 [(sem_type) = {
             description: "The GUI exposes a HTTP interface to the gRPC end point."
@@ -244,14 +317,6 @@ message GUIConfig {
             description: "CIDR addresses of vpn networks (e.g. 192.168.0.0/16). We use this to show the internal/external icon."
         }];
 
-    string google_oauth_client_id = 5 [(sem_type) = {
-            description: "If set we use oauth authentication flow.",
-        }];
-
-    string google_oauth_client_secret = 6 [(sem_type) = {
-            description: "If set we use oauth authentication flow.",
-        }];
-
     string public_url = 7 [(sem_type) = {
             description: "The public URL of this server.",
         }];
@@ -264,29 +329,28 @@ message GUIConfig {
             description: "Additional links to present in the GUI."
         }];
 
-    string saml_certificate = 12 [(sem_type) = {
-            description: "SAML certificate."
-        }];
-
-    string saml_private_key = 13 [(sem_type) = {
-            description: "SAML private key."
-        }];
-
-    string saml_idp_metadata_url = 14 [(sem_type) = {
-            description: "SAML identity provider metadata URL."
-        }];
-
-    string saml_root_url = 15 [(sem_type) = {
-            description: "SAML root URL."
-        }];
-
-    string saml_user_attribute = 16 [(sem_type) = {
-            description: "SAML attribute containing value for user identification."
-        }];
-
     // These users are created if they do no already exist in the data
     // store.
     repeated GUIUser initial_users = 17;
+
+    // The authenticator to use - can not be null.
+    Authenticator authenticator = 19;
+
+    // The GUI will filter artifact search results by this regular
+    // expression. This is useful to restrict the number of choices
+    // available in the GUI to a small subset (e.g. only certain
+    // packs).
+    string artifact_search_filter = 18;
+
+    // SAML info deprecated - will be moved to a sample authenticator.
+    string saml_certificate = 12;
+    string saml_private_key = 13;
+    string saml_idp_metadata_url = 14;
+    string saml_root_url = 15;
+    string saml_user_attribute = 16;
+    // DEPRECATED: Will be moved to a Google authenticator
+    string google_oauth_client_id = 5;
+    string google_oauth_client_secret = 6;
 }
 
 message GUIUser {
@@ -311,7 +375,9 @@ message ReverseProxyConfig {
 
 
 message DynDNSConfig {
-    string hostname = 1;
+    string hostname = 1 [deprecated=true];
+
+    // Not used any more - we take the hostname from Frontend.Hostname.
     string ddns_username = 2;
     string ddns_password = 3;
     string update_url = 4;
@@ -319,6 +385,11 @@ message DynDNSConfig {
 }
 
 message FrontendConfig {
+    string public_path = 8 [deprecated=true];
+
+    // Publicly accessible hostname for this frontend.
+    string hostname = 19;
+
     string bind_address = 1 [(sem_type) = {
             description: "Address to bind frontend endpoint. Clients connect to this endpoint to poll for jobs."
         }];
@@ -326,6 +397,16 @@ message FrontendConfig {
     uint32 bind_port = 2 [(sem_type) = {
             description: "Port to bind to."
         }];
+
+    // Serve the GUI from this base path instead of "/"
+    string base_path = 25;
+
+    // This allows the frontends to listen on plain HTTP - It is
+    // useful if you have SSL offloading (e.g. ngix). This is not
+    // configured by the wizard - you will need to manually configure
+    // it. You better know what you are doing here!
+    bool use_plain_http = 24;
+
 
     string certificate = 3 [(sem_type) = {
             description: "X509 Certificate of frontend server."
@@ -337,14 +418,6 @@ message FrontendConfig {
 
     string dns_name = 6 [(sem_type) = {
             description: "The DNS name of the frontend."
-        }];
-
-    string artifacts_path = 7 [(sem_type) = {
-            description: "Path to additional artifacts to load",
-        }];
-
-    string public_path = 8 [(sem_type) = {
-            description: "If specified we export this path through the /public/ handler.",
         }];
 
     uint64 concurrency = 9 [(sem_type) = {
@@ -369,22 +442,55 @@ message FrontendConfig {
     string proxy_header = 13 [(sem_type) = {
             description: "Header defined by the proxy containing the remote address",
         }];
+
+    repeated string default_client_monitoring_artifacts = 14 [(sem_type) ={
+            description: "The initial set of client monitoring artifacts."
+        }];
+
+    string run_as_user = 16 [(sem_type) = {
+            description: "The user that the frontend should run as. If set we refuse to run as a different user.",
+        }];
+
+    // Various performoance related tweaks.
+    int64 expected_clients = 15 [(sem_type) = {
+            description: "Expected number of clients in this deployment (default 10000)",
+        }];
+
+    int64 GRPC_pool_max_size = 17;
+    int64 GRPC_pool_max_wait = 18;
+
+    // The services that will run on this frontend. If not set, all
+    // services will run on the primary frontend.
+    ServerServicesConfig server_services = 20;
+
+    // Per client rate in bytes/sec
+    int64 per_client_upload_rate = 21;
+    int64 global_upload_rate = 22;
+
+    // Wait time for collecting events from clients - smaller means
+    // less latency to respond to client events but also means more
+    // TLS handshake and network overheads due to frequent POST.
+    uint64 client_event_max_wait = 23;
 }
 
 
 message DatastoreConfig {
-    string implementation = 1 [(sem_type) = {
-            description: "The name of the datastore implementation to use."
-            default: "FileBaseDataStore",
-        }];
+    // The name of the datastore implementation to use.
+    string implementation = 1;
 
-    string location = 2 [(sem_type) = {
-            description: "The location (or path) to the datastore.",
-        }];
+    // For FileBaseDataStore
+    string location = 2;
+    string filestore_directory = 3;
 
-    string filestore_directory = 3 [(sem_type) = {
-            description: "The path to store uploaded files."
-        }];
+    // For MySQL data store (Valid when implementation = "MySQL")
+    string mysql_username = 4;
+    string mysql_password = 5;
+    string mysql_database = 6;
+    string mysql_server = 7;
+
+    // Alternatively if this is set we just use this instead of the
+    // above settings.
+    string mysql_connection_string = 8;
 }
 
 // Configuration for the mail server.
@@ -446,8 +552,28 @@ message AutoExecConfig {
     repeated Artifact artifact_definitions = 2;
 }
 
+message ServerServicesConfig {
+   bool hunt_manager = 1;
+   bool hunt_dispatcher = 2;
+   bool stats_collector = 3;
+   bool server_monitoring = 4;
+   bool server_artifacts = 5;
+   bool dyn_dns = 6;
+   bool interrogation = 7;
+   bool sanity_checker = 8;
+   bool vfs_service = 9;
+   bool user_manager = 10;
+   bool client_monitoring = 11;
+   bool monitoring_service = 12;
+   bool api_server = 13;
+   bool frontend_server = 14;
+   bool gui_server = 15;
+}
+
 
 message Config {
+    string autocert_domain = 21 [deprecated=true];
+
     Version version = 8 [(sem_type) = {
             description: "Version information."
         }];
@@ -466,6 +592,11 @@ message Config {
 
     FrontendConfig Frontend = 5;
 
+    // A list of possible frontends to use. When deployed in
+    // multi-frontend configuration we select on those and populate
+    // the Frontend field above.
+    repeated FrontendConfig ExtraFrontends = 31;
+
     DatastoreConfig Datastore = 6;
 
     Writeback Writeback = 9 [(sem_type) = {
@@ -480,22 +611,9 @@ message Config {
             description: "Enable verbose logging output.",
         }];
 
-    string autocert_domain = 21 [(sem_type) = {
-            description: "Domain to use for autocerts (letsencrypt). "
-            "This must be resolvable to the frontend via DNS."
-            "NOTE: When this is set, both the GUI and frontend will "
-            "use ports 80 and 443 - the client.server_urls must be of the form "
-            " https://autocert_domain/",
-        }];
 
     string autocert_cert_cache = 22 [(sem_type) = {
             description: "Path to store autocert certificates.",
-        }];
-
-    bool disable_self_signed_ssl = 27 [(sem_type) = {
-            description: "If set this disables use of self signed SSL and allows http only "
-            "client comms and GUI console."
-            default: "false",
         }];
 
     MonitoringConfig Monitoring = 25 [(sem_type) = {
@@ -510,4 +628,11 @@ message Config {
            description: "If this is specified we launch the binary with the given command "
            "line automatically."
         }];
+
+    string server_type = 30 [(sem_type) = {
+            description: "Type of server (linux, windows, darwin)"
+        }];
+
+    // If set we obfuscate VQL to the clients using this key.
+    string obfuscation_nonce = 32;
 }

@@ -1,10 +1,13 @@
 syntax = "proto3";
 
-import "www.velocidex.com/golang/velociraptor/proto/semantic.proto";
+import "proto/semantic.proto";
 
 package proto;
 
+option go_package = "www.velocidex.com/golang/velociraptor/api/proto";
+
 message GetTableRequest {
+    // Deprecated!
     string path = 1 [(sem_type) = {
             description: "The path within the client's VFS "
             "that contains CSV file to read."
@@ -19,6 +22,16 @@ message GetTableRequest {
         }];
 
     string client_id = 4;
+    string flow_id = 5;
+    string artifact = 6;
+
+    string type = 7;
+
+    string hunt_id = 8;
+
+    string notebook_id = 9;
+    string cell_id = 10;
+    int64 table_id = 11;
 }
 
 message Row {

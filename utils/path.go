@@ -15,6 +15,27 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
+/*
+   Velociraptor paths are a list of components (strings). Paths may be
+   serialized into a string by joining the components using a path
+   separator which can be / or \
+
+   A path component itself may also contain path separators like / or
+   \. If it does, then Velociraptor uses a special escaping scheme to
+   preserve the component as one unit. Therefore path serialization
+   followed by de-serialization is preserved on roundtrip.
+
+   For example the path:
+
+   "HKEY_USERS", "S-1-5-21-546003962-2713609280-610790815-1003",
+   "Software", "Microsoft", "Windows", "CurrentVersion", "Run",
+   "c:\\windows\\system32\\mshta.exe",
+
+   Will be serialized into:
+
+   \HKEY_USERS\S-1-5-21-546003962-2713609280-610790815-1003\Software\Microsoft\Windows\CurrentVersion\Run\"c:\windows\system32\mshta.exe"
+
+*/
 package utils
 
 import (
@@ -26,63 +47,238 @@ import (
 // values may contain path separators in their name, we need to ensure
 // such names are escaped using quotes. For example:
 // HKEY_USERS\S-1-5-21-546003962-2713609280-610790815-1003\Software\Microsoft\Windows\CurrentVersion\Run\"c:\windows\system32\mshta.exe"
-var component_quoted_regex = regexp.MustCompile(`^"((?:[^"\\]*(?:\\"?)?)+)"`)
-var component_unquoted_regex = regexp.MustCompile(`^[\\/]?([^\\/]*)([\\/]?|$)`)
 var drive_letter_regex = regexp.MustCompile(`^[a-zA-Z]:$`)
+
+func consumeComponent(path string) (next_path string, component string) {
+	if len(path) == 0 {
+		return "", ""
+	}
+	length := len(path)
+
+	switch path[0] {
+	case '/', '\\':
+		return path[1:], ""
+
+	case '"':
+		result := []byte{}
+		for i := 1; i < length; i++ {
+			switch path[i] {
+			case '"':
+				if i >= length-1 {
+					return "", string(result)
+				}
+
+				next_char := path[i+1]
+				switch next_char {
+				case '"': // Double quoted quote
+					result = append(result, next_char)
+					i += 1
+					continue
+
+				case '/', '\\':
+					return path[i+1 : length], string(result)
+				default:
+					// Should never happen, " followed by *
+					result = append(result, next_char)
+					continue
+				}
+
+			default:
+				result = append(result, path[i])
+			}
+		}
+
+		// If we get here it is unterminated (e.g. '"foo<EOF>')
+		return "", string(result)
+
+	default:
+		for i := 0; i < length; i++ {
+			switch path[i] {
+			case '/', '\\':
+				return path[i:length], path[:i]
+			}
+		}
+	}
+
+	return "", path
+}
 
 func SplitComponents(path string) []string {
 	var components []string
-	for len(path) > 0 {
-		match := component_quoted_regex.FindStringSubmatch(path)
-		if len(match) > 0 {
-			if len(match[1]) > 0 {
-				components = append(components, match[1])
-			}
-			path = path[len(match[0]):]
-			continue
-		}
-		match = component_unquoted_regex.FindStringSubmatch(path)
-		if len(match) > 0 {
-			if len(match[1]) > 0 {
-				components = append(components, match[1])
-			}
-			path = path[len(match[0]):]
-			continue
-		}
+	var component string
 
-		// This should never happen!
-		return strings.Split(path, "\\")
+	for path != "" {
+		path, component = consumeComponent(path)
+		if component != "" && component != "." && component != ".." {
+			components = append(components, component)
+		}
 	}
+
 	return components
+}
+
+func consumePlainComponent(path string) (next_path string, component string) {
+	if len(path) == 0 {
+		return "", ""
+	}
+	length := len(path)
+
+	switch path[0] {
+	case '/', '\\':
+		return path[1:], ""
+
+	default:
+		for i := 0; i < length; i++ {
+			switch path[i] {
+			case '/', '\\':
+				return path[i:length], path[:i]
+			}
+		}
+	}
+
+	return "", path
+}
+
+func SplitPlainComponents(path string) []string {
+	var components []string
+	var component string
+
+	for path != "" {
+		path, component = consumePlainComponent(path)
+		if component != "" {
+			components = append(components, component)
+		}
+	}
+
+	return components
+}
+
+func escapeComponent(component string) string {
+	hasQuotes := false
+	result := make([]byte, 0, len(component)*2)
+	for i := 0; i < len(component); i++ {
+		result = append(result, component[i])
+
+		switch component[i] {
+		case '/', '\\':
+			hasQuotes = true
+		case '"':
+			hasQuotes = true
+			result = append(result, '"')
+		}
+	}
+
+	if hasQuotes {
+		result = append(result, '"')
+		result = append([]byte{'"'}, result...)
+	}
+
+	return string(result)
 }
 
 // The opposite of SplitComponents above.
 func JoinComponents(components []string, sep string) string {
+	if len(components) == 0 {
+		return sep
+	}
+
 	result := []string{}
-	for _, component := range components {
-		// The component contains any separator then we must
-		// escape it.
-		if strings.Contains(component, "\\") ||
-			strings.Contains(component, "/") {
-			component = "\"" + component + "\""
+	for idx, component := range components {
+		// If the first component looks like a drive letter
+		// then omit the leading /
+		if idx == 0 && drive_letter_regex.FindString(components[0]) == "" {
+			result = append(result, "")
 		}
-		result = append(result, component)
+		if component != "" {
+			result = append(result, escapeComponent(component))
+		}
 	}
-
-	if len(components) > 0 &&
-		drive_letter_regex.FindString(components[0]) == "" {
-		return sep + strings.Join(result, sep)
-	}
-
 	return strings.Join(result, sep)
 }
 
 func PathJoin(root, stem, sep string) string {
-	// If any of the subsequent components contain
-	// a slash then escape them together.
-	if strings.Contains(stem, "/") || strings.Contains(stem, "\\") {
-		stem = "\"" + stem + "\""
+	return strings.TrimSuffix(root, sep) + sep + escapeComponent(stem)
+}
+
+func Dir(path string) string {
+	components := SplitComponents(path)
+	if len(components) > 0 {
+		return JoinComponents(components[:len(components)-1], "/")
+	}
+	return ""
+}
+
+func Base(path string) string {
+	components := SplitComponents(path)
+	if len(components) > 0 {
+		return components[len(components)-1]
+	}
+	return ""
+}
+
+// A compbined Dir and Base
+func PathSplit(path string) (string, string) {
+	components := SplitComponents(path)
+	length := len(components)
+	if length > 0 {
+		return JoinComponents(components[:length-1], "/"), components[length-1]
+	}
+	return "", ""
+}
+
+func Clean(path string) string {
+	return JoinComponents(SplitComponents(path), "/")
+}
+
+func CleanPathForZip(filename, client_id, hostname string) string {
+	hostname = SanitizeString(hostname)
+	components := []string{}
+	for _, component := range SplitComponents(filename) {
+		// Replace any client id with hostnames
+		if component == client_id {
+			component = hostname
+		}
+
+		components = append(components, SanitizeString(component))
 	}
 
-	return root + sep + stem
+	// Zip files should not have absolute paths
+	filename = strings.Join(components, "/")
+	return filename
+}
+
+// We are very conservative about our escaping.
+func shouldEscape(c byte) bool {
+	if 'A' <= c && c <= 'Z' ||
+		'a' <= c && c <= 'z' ||
+		'0' <= c && c <= '9' {
+		return false
+	}
+
+	switch c {
+	case '-', '_', '.', '~', ' ', '$':
+		return false
+	}
+
+	return true
+}
+
+var hexTable = []byte("0123456789ABCDEF")
+
+func SanitizeString(component string) string {
+	result := make([]byte, len(component)*4)
+	result_idx := 0
+
+	for _, c := range []byte(component) {
+		if !shouldEscape(c) {
+			result[result_idx] = c
+			result_idx += 1
+		} else {
+			result[result_idx] = '%'
+			result[result_idx+1] = hexTable[c>>4]
+			result[result_idx+2] = hexTable[c&15]
+			result_idx += 3
+		}
+	}
+	return string(result[:result_idx])
 }

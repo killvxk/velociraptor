@@ -18,34 +18,30 @@
 package flows
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
-	"io/ioutil"
-	"path"
+	"strings"
 	"time"
 
-	"github.com/golang/protobuf/proto"
-	"github.com/golang/protobuf/ptypes"
+	"github.com/Velocidex/ordereddict"
 	errors "github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/sirupsen/logrus"
-	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	artifacts "www.velocidex.com/golang/velociraptor/artifacts"
-	artifacts_proto "www.velocidex.com/golang/velociraptor/artifacts/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	constants "www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/crypto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
+	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store"
-	"www.velocidex.com/golang/velociraptor/file_store/csv"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
+	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/result_sets"
 	"www.velocidex.com/golang/velociraptor/services"
 	utils "www.velocidex.com/golang/velociraptor/utils"
-	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
-	"www.velocidex.com/golang/vfilter"
 )
 
 var (
@@ -53,381 +49,642 @@ var (
 		Name: "uploaded_files",
 		Help: "Total number of Uploaded Files.",
 	})
+
+	uploadBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "uploaded_bytes",
+		Help: "Total bytes of Uploaded Files.",
+	})
 )
 
-const (
-	_                          = iota
-	processVQLResponses uint64 = iota
-)
-
-type ArtifactCollector struct {
-	*BaseFlow
-}
-
-func (self *ArtifactCollector) New() Flow {
-	return &ArtifactCollector{&BaseFlow{}}
-}
-
-func (self *ArtifactCollector) Start(
+// closeContext is called after all messages from the clients are
+// processed in this group. Client messages are sent in groups inside
+// the same POST request. Most of the time they belong to the same
+// collection context. Therefore it makes sense to keep information in
+// memory between processing individual messages. At the end of the
+// processing we can close the context and flush data to disk.
+func closeContext(
 	config_obj *config_proto.Config,
-	flow_obj *AFF4FlowObject,
-	args proto.Message) error {
-	collector_args, ok := args.(*flows_proto.ArtifactCollectorArgs)
-	if !ok {
-		return errors.New("Expected args of type ArtifactCollectorArgs")
+	collection_context *flows_proto.ArtifactCollectorContext) error {
+
+	// Context is not dirty - nothing to do.
+	if !collection_context.Dirty || collection_context.ClientId == "" {
+		return nil
 	}
 
-	if collector_args.Artifacts == nil || len(collector_args.Artifacts.Names) == 0 {
-		return errors.New("Some artifacts to run are required.")
-	}
-
-	repository, err := artifacts.GetGlobalRepository(config_obj)
+	// Decide if this collection exceeded its quota.
+	err := checkContextResourceLimits(config_obj, collection_context)
 	if err != nil {
 		return err
 	}
 
-	// Update the flow's artifacts list.
-	flow_obj.SetContext(flow_obj.FlowContext)
-
-	vql_collector_args := &actions_proto.VQLCollectorArgs{
-		OpsPerSecond: collector_args.OpsPerSecond,
-		Timeout:      collector_args.Timeout,
+	if collection_context.StartTime == 0 {
+		collection_context.StartTime = uint64(time.Now().UnixNano() / 1000)
 	}
-	for _, name := range collector_args.Artifacts.Names {
-		var artifact *artifacts_proto.Artifact = nil
-		if collector_args.AllowCustomOverrides {
-			artifact, _ = repository.Get("Custom." + name)
-		}
 
-		if artifact == nil {
-			artifact, _ = repository.Get(name)
-		}
+	collection_context.ActiveTime = uint64(time.Now().UnixNano() / 1000)
 
-		if artifact == nil {
-			return errors.New("Unknown artifact " + name)
+	if len(collection_context.Logs) > 0 {
+		err := flushContextLogs(config_obj, collection_context)
+		if err != nil {
+			collection_context.State = flows_proto.ArtifactCollectorContext_ERROR
+			collection_context.Status = err.Error()
 		}
+	}
 
-		err := repository.Compile(artifact, vql_collector_args)
+	if len(collection_context.UploadedFiles) > 0 {
+		err := flushContextUploadedFiles(
+			config_obj, collection_context)
+		if err != nil {
+			collection_context.State = flows_proto.ArtifactCollectorContext_ERROR
+			collection_context.Status = err.Error()
+		}
+	}
+	collection_context.Dirty = false
+
+	// Write the data before we fire the event.
+	db, err := datastore.GetDB(config_obj)
+	if err != nil {
+		collection_context.State = flows_proto.ArtifactCollectorContext_ERROR
+		collection_context.Status = err.Error()
+	}
+
+	flow_path_manager := paths.NewFlowPathManager(
+		collection_context.ClientId, collection_context.SessionId)
+	err = db.SetSubject(config_obj, flow_path_manager.Path(), collection_context)
+	if err != nil {
+		return err
+	}
+
+	// This is the final time we update the context - send a
+	// journal message.
+	if collection_context.Request != nil &&
+		collection_context.State != flows_proto.ArtifactCollectorContext_RUNNING {
+		row := ordereddict.NewDict().
+			Set("Timestamp", time.Now().UTC().Unix()).
+			Set("Flow", collection_context).
+			Set("FlowId", collection_context.SessionId).
+			Set("ClientId", collection_context.ClientId)
+
+		journal, err := services.GetJournal()
 		if err != nil {
 			return err
 		}
 
-		flow_obj.FlowContext.Artifacts = append(flow_obj.FlowContext.Artifacts,
-			artifact.Name)
+		return journal.PushRowsToArtifact(config_obj,
+			[]*ordereddict.Dict{row},
+			"System.Flow.Completion", collection_context.ClientId,
+			collection_context.SessionId,
+		)
 	}
 
-	// Add any artifact dependencies.
-	err = repository.PopulateArtifactsVQLCollectorArgs(vql_collector_args)
-	if err != nil {
-		return err
-	}
-
-	err = AddArtifactCollectorArgs(
-		config_obj, vql_collector_args, collector_args)
-	if err != nil {
-		return err
-	}
-
-	err = artifacts.Obfuscate(config_obj, vql_collector_args)
-	if err != nil {
-		return err
-	}
-
-	return QueueMessageForClient(
-		config_obj, flow_obj.RunnerArgs.ClientId,
-		&crypto_proto.GrrMessage{
-			SessionId:       flow_obj.Urn,
-			RequestId:       processVQLResponses,
-			VQLClientAction: vql_collector_args})
+	return nil
 }
 
-func (self *ArtifactCollector) ProcessMessage(
+func flushContextLogs(
 	config_obj *config_proto.Config,
-	flow_obj *AFF4FlowObject,
+	collection_context *flows_proto.ArtifactCollectorContext) error {
+
+	flow_path_manager := paths.NewFlowPathManager(
+		collection_context.ClientId,
+		collection_context.SessionId).Log()
+
+	// Append logs to messages from previous packets.
+	rs_writer, err := result_sets.NewResultSetWriter(
+		config_obj, flow_path_manager, nil, false /* truncate */)
+	if err != nil {
+		return err
+	}
+	defer rs_writer.Close()
+
+	for _, row := range collection_context.Logs {
+		rs_writer.Write(ordereddict.NewDict().
+			Set("Timestamp", fmt.Sprintf("%v", row.Timestamp)).
+			Set("time", time.Unix(int64(row.Timestamp)/1000000, 0).String()).
+			Set("message", row.Message))
+	}
+
+	// Clear the logs from the flow object.
+	collection_context.Logs = nil
+	return nil
+}
+
+// Flush the logs to a csv file. This is important for long running
+// flows with a lot of log messages.
+func flushContextUploadedFiles(
+	config_obj *config_proto.Config,
+	collection_context *flows_proto.ArtifactCollectorContext) error {
+
+	flow_path_manager := paths.NewFlowPathManager(
+		collection_context.ClientId,
+		collection_context.SessionId).UploadMetadata()
+
+	rs_writer, err := result_sets.NewResultSetWriter(
+		config_obj, flow_path_manager, nil, false /* truncate */)
+	if err != nil {
+		return err
+	}
+	defer rs_writer.Close()
+
+	for _, row := range collection_context.UploadedFiles {
+		rs_writer.Write(ordereddict.NewDict().
+			Set("Timestamp", time.Now().UTC().Unix()).
+			Set("started", time.Now().UTC().String()).
+			Set("vfs_path", row.Name).
+			Set("file_size", row.Size).
+			Set("uploaded_size", row.StoredSize))
+	}
+
+	// Clear the logs from the flow object.
+	collection_context.UploadedFiles = nil
+	return nil
+}
+
+// Load the collector context from storage.
+func LoadCollectionContext(
+	config_obj *config_proto.Config,
+	client_id, flow_id string) (*flows_proto.ArtifactCollectorContext, error) {
+
+	if flow_id == constants.MONITORING_WELL_KNOWN_FLOW {
+		return &flows_proto.ArtifactCollectorContext{
+			SessionId: flow_id,
+			ClientId:  client_id,
+		}, nil
+	}
+
+	flow_path_manager := paths.NewFlowPathManager(client_id, flow_id)
+	collection_context := &flows_proto.ArtifactCollectorContext{}
+	db, err := datastore.GetDB(config_obj)
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.GetSubject(config_obj, flow_path_manager.Path(),
+		collection_context)
+	if err != nil {
+		return nil, err
+	}
+
+	if collection_context.SessionId == "" {
+		return nil, errors.New("Unknown flow " + client_id + " " + flow_id)
+	}
+
+	collection_context.Dirty = false
+
+	return collection_context, nil
+}
+
+// Process an incoming message from the client.
+func ArtifactCollectorProcessOneMessage(
+	config_obj *config_proto.Config,
+	collection_context *flows_proto.ArtifactCollectorContext,
 	message *crypto_proto.GrrMessage) error {
 
-	err := flow_obj.FailIfError(config_obj, message)
+	err := FailIfError(config_obj, collection_context, message)
 	if err != nil {
-		if constants.HuntIdRegex.MatchString(flow_obj.RunnerArgs.Creator) {
-			err = services.GetHuntDispatcher().ModifyHunt(
-				flow_obj.RunnerArgs.Creator,
-				func(hunt *api_proto.Hunt) error {
-					hunt.Stats.TotalClientsWithErrors++
-					return nil
-				})
-		}
-
 		return err
 	}
 
+	// Check that this is not a retransmission - if it is we drop
+	// it on the floor.
+	if message.ResponseId < collection_context.NextResponseId {
+		return nil
+	}
+	collection_context.NextResponseId = message.ResponseId + 1
+	collection_context.Dirty = true
+
+	// Handle the response depending on the RequestId
 	switch message.RequestId {
 	case constants.TransferWellKnownFlowId:
-		log_path := path.Join(
-			"clients", flow_obj.RunnerArgs.ClientId,
-			"uploads", path.Base(message.SessionId))
+		return appendUploadDataToFile(
+			config_obj, collection_context, message)
 
-		return appendDataToFile(
-			config_obj, flow_obj, log_path, message)
-
-	case processVQLResponses:
-		if flow_obj.IsRequestComplete(message) {
-			if constants.HuntIdRegex.MatchString(flow_obj.RunnerArgs.Creator) {
-				err = services.GetHuntDispatcher().ModifyHunt(
-					flow_obj.RunnerArgs.Creator,
-					func(hunt *api_proto.Hunt) error {
-						hunt.Stats.TotalClientsWithResults++
-						return nil
-					})
-				if err != nil {
-					return err
-				}
-			}
-
-			return flow_obj.Complete(config_obj)
+	case constants.ProcessVQLResponses:
+		completed, err := IsRequestComplete(
+			config_obj, collection_context, message)
+		if err != nil {
+			return err
 		}
 
-		// Restore strings from flow state.
+		if completed {
+			return nil
+		}
+
 		response := message.VQLResponse
-		if response == nil {
+		if response == nil || response.Query == nil {
 			return errors.New("Expected args of type VQLResponse")
 		}
 
-		err := artifacts.Deobfuscate(config_obj, response)
+		if collection_context == nil || collection_context.Request == nil {
+			return errors.New("Invalid collection context")
+		}
+
+		err = artifacts.Deobfuscate(config_obj, response)
 		if err != nil {
 			return err
 		}
 
-		artifact_name, source_name := artifacts.
-			QueryNameToArtifactAndSource(response.Query.Name)
-
-		// Store the event log in the client's VFS.
+		rows_written := uint64(0)
 		if response.Query.Name != "" {
-			log_path := artifacts.GetCSVPath(
-				flow_obj.RunnerArgs.ClientId, "",
-				path.Base(flow_obj.Urn),
-				artifact_name, source_name, artifacts.MODE_CLIENT)
+			path_manager := result_sets.NewArtifactPathManager(config_obj,
+				collection_context.Request.ClientId,
+				collection_context.SessionId,
+				response.Query.Name)
 
-			file_store_factory := file_store.GetFileStore(config_obj)
-			fd, err := file_store_factory.WriteFile(log_path)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				return err
-			}
-			defer fd.Close()
+			rs_writer, err := result_sets.NewResultSetWriter(
+				config_obj, path_manager, nil, false /* truncate */)
 
-			writer, err := csv.GetCSVWriter(vql_subsystem.MakeScope(), fd)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				return err
-			}
-			defer writer.Close()
+			// Support the old clients which send JSON
+			// array responses. We need to decode the JSON
+			// response, then re-encode it into JSONL for
+			// log files.
+			if len(response.Response) > 0 {
+				if err != nil {
+					return err
+				}
+				defer rs_writer.Close()
 
-			// Decode the JSON data.
-			var rows []map[string]interface{}
-			err = json.Unmarshal([]byte(response.Response), &rows)
-			if err != nil {
-				return errors.WithStack(err)
-			}
-
-			for _, row := range rows {
-				csv_row := vfilter.NewDict()
-
-				for _, column := range response.Columns {
-					item, pres := row[column]
-					if !pres {
-						csv_row.Set(column, "-")
-					} else {
-						csv_row.Set(column, item)
-					}
+				rows, err := utils.ParseJsonToDicts([]byte(
+					response.Response))
+				if err != nil {
+					return err
 				}
 
-				writer.Write(csv_row)
+				for _, row := range rows {
+					rows_written++
+					rs_writer.Write(row)
+				}
+
+				// New clients already encode the JSON
+				// as line delimited, so we only need
+				// to append to end of the log file -
+				// much faster!
+			} else if len(response.JSONLResponse) > 0 {
+				rs_writer.WriteJSONL([]byte(response.JSONLResponse))
+				rows_written = response.TotalRows
 			}
 
 			// Update the artifacts with results in the
 			// context.
-			if len(rows) > 0 && !utils.InString(
-				&flow_obj.FlowContext.ArtifactsWithResults,
-				response.Query.Name) {
-				flow_obj.FlowContext.
-					ArtifactsWithResults = append(
-					flow_obj.FlowContext.ArtifactsWithResults,
-					response.Query.Name)
+			if rows_written > 0 {
+				if !utils.InString(collection_context.ArtifactsWithResults,
+					response.Query.Name) {
+					collection_context.ArtifactsWithResults = append(
+						collection_context.ArtifactsWithResults,
+						response.Query.Name)
+				}
+				collection_context.TotalCollectedRows += rows_written
+				collection_context.Dirty = true
 			}
 		}
 	}
+
 	return nil
 }
 
-// Adds any parameters set in the ArtifactCollectorArgs into the
-// VQLCollectorArgs.
-func AddArtifactCollectorArgs(
+func IsRequestComplete(
 	config_obj *config_proto.Config,
-	vql_collector_args *actions_proto.VQLCollectorArgs,
-	collector_args *flows_proto.ArtifactCollectorArgs) error {
+	collection_context *flows_proto.ArtifactCollectorContext,
+	message *crypto_proto.GrrMessage) (bool, error) {
 
-	// Add any Environment Parameters from the request.
-	if collector_args.Parameters == nil {
+	// Nope request is not complete.
+	if message.Status == nil {
+		return false, nil
+	}
+
+	// Complete the collection
+	if collection_context == nil || collection_context.Request == nil {
+		return false, errors.New("Invalid collection context")
+	}
+
+	// Only terminate a running flow.
+	if collection_context.State == flows_proto.ArtifactCollectorContext_RUNNING {
+
+		// Update any hunts if needed.
+		if constants.HuntIdRegex.MatchString(collection_context.Request.Creator) {
+			err := services.GetHuntDispatcher().ModifyHunt(
+				collection_context.Request.Creator,
+				func(hunt *api_proto.Hunt) error {
+					if hunt != nil && hunt.Stats != nil {
+						hunt.Stats.TotalClientsWithResults++
+					}
+					return nil
+				})
+			if err != nil {
+				return true, err
+			}
+		}
+
+		collection_context.ExecutionDuration = message.Status.Duration
+		collection_context.State = flows_proto.ArtifactCollectorContext_FINISHED
+		collection_context.Dirty = true
+	}
+
+	return true, nil
+}
+
+func FailIfError(
+	config_obj *config_proto.Config,
+	collection_context *flows_proto.ArtifactCollectorContext,
+	message *crypto_proto.GrrMessage) error {
+
+	// Not a status message
+	if message.Status == nil {
 		return nil
 	}
 
-	for _, item := range collector_args.Parameters.Env {
-		vql_collector_args.Env = append(vql_collector_args.Env,
-			&actions_proto.VQLEnv{Key: item.Key, Value: item.Value})
+	// If the status is OK then we do not fail the flow.
+	if message.Status.Status == crypto_proto.GrrStatus_OK {
+		return nil
 	}
 
-	// Add any exported files.
-	file_store_factory := file_store.GetFileStore(config_obj)
+	if collection_context == nil || collection_context.Request == nil {
+		return errors.New("Invalid collection context")
+	}
 
-	for _, item := range collector_args.Parameters.Files {
-		file, err := file_store_factory.ReadFile(path.Join(
-			"/exported_files", item.Value))
+	// Only terminate a running flows.
+	if collection_context.State != flows_proto.ArtifactCollectorContext_RUNNING {
+		return errors.New(message.Status.ErrorMessage)
+	}
+
+	collection_context.State = flows_proto.ArtifactCollectorContext_ERROR
+	collection_context.ActiveTime = uint64(time.Now().UnixNano() / 1000)
+	collection_context.Status = message.Status.ErrorMessage
+	collection_context.Backtrace = message.Status.Backtrace
+	collection_context.ExecutionDuration = message.Status.Duration
+	collection_context.Dirty = true
+
+	// Update the hunt stats if this is a hunt.
+	if constants.HuntIdRegex.MatchString(collection_context.Request.Creator) {
+		err := services.GetHuntDispatcher().ModifyHunt(
+			collection_context.Request.Creator,
+			func(hunt *api_proto.Hunt) error {
+				if hunt != nil && hunt.Stats != nil {
+					hunt.Stats.TotalClientsWithErrors++
+				}
+				return nil
+			})
 		if err != nil {
-			logger := logging.GetLogger(config_obj, &logging.ToolComponent)
-			logger.WithFields(
-				logrus.Fields{
-					"filename": item.Value,
-					"error":    fmt.Sprintf("%v", err),
-				}).Error("Unable to read VFS file")
 			return err
 		}
-		defer file.Close()
-
-		buf, err := ioutil.ReadAll(
-			io.LimitReader(file, constants.MAX_MEMORY))
-		if err != nil {
-			continue
-		}
-		vql_collector_args.Env = append(vql_collector_args.Env,
-			&actions_proto.VQLEnv{
-				Key:   item.Key,
-				Value: string(buf),
-			})
 	}
-	return nil
+
+	return errors.New(message.Status.ErrorMessage)
 }
 
-func appendDataToFile(
+func appendUploadDataToFile(
 	config_obj *config_proto.Config,
-	flow_obj *AFF4FlowObject,
-	base_urn string,
+	collection_context *flows_proto.ArtifactCollectorContext,
 	message *crypto_proto.GrrMessage) error {
+
 	file_buffer := message.FileBuffer
-	if file_buffer == nil {
+	if file_buffer == nil || file_buffer.Pathspec == nil {
 		return errors.New("Expected args of type FileBuffer")
 	}
 
 	file_store_factory := file_store.GetFileStore(config_obj)
-	file_path := path.Join(base_urn, file_buffer.Pathspec.Accessor,
+
+	flow_path_manager := paths.NewFlowPathManager(
+		message.Source, collection_context.SessionId)
+
+	// Figure out where to store the file.
+	file_path_manager := flow_path_manager.GetUploadsFile(
+		file_buffer.Pathspec.Accessor,
 		file_buffer.Pathspec.Path)
-	fd, err := file_store_factory.WriteFile(file_path)
+
+	fd, err := file_store_factory.WriteFile(file_path_manager.Path())
 	if err != nil {
 		// If we fail to write this one file we keep going -
 		// otherwise the flow will be terminated.
-		flow_obj.Log(config_obj, fmt.Sprintf("While writing to %v: %v",
-			file_path, err))
+		Log(config_obj, collection_context,
+			fmt.Sprintf("While writing to %v: %v",
+				file_path_manager.Path(), err))
 		return nil
 	}
 	defer fd.Close()
 
 	// Keep track of all the files we uploaded.
 	if file_buffer.Offset == 0 {
-		fd.Truncate(0)
-		flow_obj.FlowContext.TotalUploadedFiles += 1
-		flow_obj.FlowContext.TotalExpectedUploadedBytes += file_buffer.Size
-		flow_obj.FlowContext.UploadedFiles = append(
-			flow_obj.FlowContext.UploadedFiles,
-			&flows_proto.UploadedFileInfo{
-				Name: file_path,
-				Size: file_buffer.Size,
+		err = fd.Truncate()
+		if err != nil {
+			return err
+		}
+
+		// If the file is sparse we can store a different
+		// amount from the actual file size. Therefore in that
+		// case we expect less bytes to be sent.
+		size := file_buffer.Size
+		if file_buffer.IsSparse {
+			size = file_buffer.StoredSize
+		}
+
+		collection_context.TotalUploadedFiles += 1
+		collection_context.TotalExpectedUploadedBytes += size
+		collection_context.UploadedFiles = append(
+			collection_context.UploadedFiles,
+			&flows_proto.ArtifactUploadedFileInfo{
+				Name:       file_path_manager.Path(),
+				Size:       file_buffer.Size,
+				StoredSize: size,
 			})
-		flow_obj.dirty = true
+		collection_context.Dirty = true
 	}
 
 	if len(file_buffer.Data) > 0 {
-		flow_obj.FlowContext.TotalUploadedBytes += uint64(len(file_buffer.Data))
-		flow_obj.dirty = true
+		collection_context.TotalUploadedBytes += uint64(len(file_buffer.Data))
+		collection_context.Dirty = true
 	}
 
-	fd.Seek(int64(file_buffer.Offset), 0)
 	_, err = fd.Write(file_buffer.Data)
 	if err != nil {
-		flow_obj.Log(config_obj, fmt.Sprintf("While writing to %v: %v",
-			file_path, err))
+		Log(config_obj, collection_context,
+			fmt.Sprintf("While writing to %v: %v",
+				file_path_manager.Path(), err))
 		return nil
+	}
+
+	// Does this packet have an index? It could be sparse.
+	if file_buffer.Index != nil {
+		fd, err := file_store_factory.WriteFile(file_path_manager.IndexPath())
+		if err != nil {
+			return err
+		}
+		defer fd.Close()
+
+		err = fd.Truncate()
+		if err != nil {
+			return err
+		}
+
+		data := json.MustMarshalIndent(file_buffer.Index)
+		_, err = fd.Write(data)
+		if err != nil {
+			return err
+		}
+
+		collection_context.UploadedFiles = append(
+			collection_context.UploadedFiles,
+			&flows_proto.ArtifactUploadedFileInfo{
+				Name:       file_path_manager.IndexPath(),
+				Size:       uint64(len(data)),
+				StoredSize: uint64(len(data)),
+			})
+		collection_context.Dirty = true
 	}
 
 	// When the upload completes, we emit an event.
 	if file_buffer.Eof {
 		uploadCounter.Inc()
+		uploadBytes.Add(float64(file_buffer.StoredSize))
 
-		row := vfilter.NewDict().
+		row := ordereddict.NewDict().
 			Set("Timestamp", time.Now().UTC().Unix()).
-			Set("ClientId", flow_obj.RunnerArgs.ClientId).
-			Set("VFSPath", file_path).
+			Set("ClientId", message.Source).
+			Set("VFSPath", file_path_manager.Path()).
 			Set("UploadName", file_buffer.Pathspec.Path).
 			Set("Accessor", file_buffer.Pathspec.Accessor).
-			Set("Size", file_buffer.Offset+uint64(
-				len(file_buffer.Data)))
+			Set("Size", file_buffer.Size).
+			Set("UploadedSize", file_buffer.StoredSize)
 
-		serialized, err := json.Marshal([]vfilter.Row{row})
-		if err == nil {
-			gJournalWriter.Channel <- &Event{
-				Config:    config_obj,
-				ClientId:  flow_obj.RunnerArgs.ClientId,
-				QueryName: "System.Upload.Completion",
-				Response:  string(serialized),
-				Columns: []string{"Timestamp", "ClientId",
-					"VFSPath", "UploadName",
-					"Accessor", "Size"},
-			}
+		journal, err := services.GetJournal()
+		if err != nil {
+			return err
 		}
+
+		return journal.PushRowsToArtifact(config_obj,
+			[]*ordereddict.Dict{row},
+			"System.Upload.Completion", message.Source, collection_context.SessionId,
+		)
 	}
 
 	return nil
 }
 
-// Expand all the artifacts with their sources. Since each artifact
-// can have multiple named sources, we return a list of name/source
-// name type.
-func ExpandArtifactNamesWithSouces(repository *artifacts.Repository,
-	artifact_names []string) []string {
-	result := []string{}
-
-	for _, artifact_name := range artifact_names {
-		names := []string{}
-		artifact, pres := repository.Get(artifact_name)
-		if !pres {
-			continue
-		}
-		for _, source := range artifact.Sources {
-			if source.Name != "" {
-				names = append(
-					names, artifact_name+"/"+source.Name)
-			}
-		}
-
-		if names == nil {
-			result = append(result, artifact_name)
-		} else {
-			result = append(result, names...)
-		}
-	}
-
-	return result
+func Log(config_obj *config_proto.Config,
+	collection_context *flows_proto.ArtifactCollectorContext,
+	log_msg string) {
+	log_msg = artifacts.DeobfuscateString(config_obj, log_msg)
+	collection_context.Logs = append(
+		collection_context.Logs, &crypto_proto.LogMessage{
+			Message:   log_msg,
+			Timestamp: uint64(time.Now().UTC().UnixNano() / 1000),
+		})
+	collection_context.Dirty = true
 }
 
-func init() {
-	impl := ArtifactCollector{&BaseFlow{}}
-	default_args, _ := ptypes.MarshalAny(&flows_proto.ArtifactCollectorArgs{})
-	desc := &flows_proto.FlowDescriptor{
-		Name:         "ArtifactCollector",
-		FriendlyName: "Artifact Collector",
-		Category:     "Collectors",
-		Doc:          "Collects multiple artifacts at once.",
-		ArgsType:     "ArtifactCollectorArgs",
-		DefaultArgs:  default_args,
+type FlowRunner struct {
+	context_map map[string]*flows_proto.ArtifactCollectorContext
+	config_obj  *config_proto.Config
+}
+
+func NewFlowRunner(config_obj *config_proto.Config) *FlowRunner {
+	return &FlowRunner{
+		config_obj:  config_obj,
+		context_map: make(map[string]*flows_proto.ArtifactCollectorContext),
+	}
+}
+
+func (self *FlowRunner) Close() {
+	for _, collection_context := range self.context_map {
+		err := closeContext(self.config_obj, collection_context)
+		if err != nil {
+			logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
+			logger.Error("While closing flow %v for client %v: %v",
+				collection_context.SessionId, collection_context.ClientId, err)
+		}
+	}
+}
+
+func (self *FlowRunner) ProcessSingleMessage(
+	ctx context.Context,
+	job *crypto_proto.GrrMessage) {
+
+	// Foreman messages are related to hunts.
+	if job.ForemanCheckin != nil {
+		err := ForemanProcessMessage(
+			ctx, self.config_obj,
+			job.Source, job.ForemanCheckin)
+		if err != nil {
+			logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
+			logger.Error("ForemanCheckin for client %v: %v", job.Source, err)
+		}
+		return
 	}
 
-	RegisterImplementation(desc, &impl)
+	// CSR messages are related to enrolment. By the time the
+	// message arrives here, it is authenticated and the client is
+	// fully enrolled so it serves no purpose here - Just ignore it.
+	if job.CSR != nil {
+		return
+	}
+
+	logger := logging.GetLogger(self.config_obj, &logging.FrontendComponent)
+	collection_context, pres := self.context_map[job.SessionId]
+	if !pres {
+		var err error
+
+		// Only process real flows.
+		if !strings.HasPrefix(job.SessionId, "F.") {
+			logger.Error("Invalid job SessionId %v", job.SessionId)
+			return
+		}
+
+		collection_context, err = LoadCollectionContext(
+			self.config_obj, job.Source, job.SessionId)
+		if err != nil {
+			// Ignore logs and status messages from the
+			// client. These are generated by cancel
+			// requests anyway.
+			if job.LogMessage != nil || job.Status != nil {
+				return
+			}
+
+			logger.Error(fmt.Sprintf("Unable to load flow %s: %v", job.SessionId, err))
+
+			db, err := datastore.GetDB(self.config_obj)
+			if err == nil {
+				err := db.QueueMessageForClient(self.config_obj, job.Source,
+					&crypto_proto.GrrMessage{
+						Cancel:    &crypto_proto.Cancel{},
+						SessionId: job.SessionId,
+					})
+				if err != nil {
+					logger.Error("Queueing for client %v: %v",
+						job.Source, err)
+				}
+			}
+			return
+		}
+		self.context_map[job.SessionId] = collection_context
+	}
+
+	if collection_context == nil {
+		return
+	}
+
+	if job.LogMessage != nil {
+		Log(self.config_obj, collection_context, job.LogMessage.Message)
+		return
+	}
+
+	if job.SessionId == constants.MONITORING_WELL_KNOWN_FLOW {
+		err := MonitoringProcessMessage(self.config_obj, collection_context, job)
+		if err != nil {
+			Log(self.config_obj, collection_context,
+				fmt.Sprintf("MonitoringProcessMessage: %v", err))
+		}
+		return
+	}
+
+	err := ArtifactCollectorProcessOneMessage(
+		self.config_obj, collection_context, job)
+	if err != nil {
+		Log(self.config_obj, collection_context,
+			fmt.Sprintf("While processing job %v", err))
+	}
+}
+
+func (self *FlowRunner) ProcessMessages(ctx context.Context,
+	message_info *crypto.MessageInfo) (err error) {
+
+	return message_info.IterateJobs(ctx, self.ProcessSingleMessage)
 }

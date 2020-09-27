@@ -39,9 +39,11 @@ const PAGE_SIZE = 100;
  * @ngInject
  */
 const FlowsListController = function(
-    $scope, $element, grrApiService) {
+    $scope, $element, grrApiService, grrRoutingService) {
   /** @private {!angular.Scope} */
-  this.scope_ = $scope;
+    this.scope_ = $scope;
+
+    this.grrRoutingService_ = grrRoutingService;
 
   /** @private {!angular.jQuery} */
   this.element_ = $element;
@@ -73,9 +75,25 @@ const FlowsListController = function(
 
   // Propagate our triggerUpdate implementation to the scope so that users of
   // this directive can use it.
-  this.scope_['triggerUpdate'] = this.triggerUpdate.bind(this);
+    this.scope_['triggerUpdate'] = this.triggerUpdate.bind(this);
+
+    this.grrRoutingService_.uiOnParamsChanged(
+        this.scope_, ['clientId', 'flowId'],
+        this.onRoutingParamsChange_.bind(this));
 };
 
+
+FlowsListController.prototype.onRoutingParamsChange_ = function(
+    unused_newValues, opt_stateParams) {
+    if (opt_stateParams["clientId"]) {
+        this.clientId = opt_stateParams["clientId"];
+    }
+
+    if (opt_stateParams['flowId']) {
+        this.selectedFlowId = opt_stateParams['flowId'];
+        this.tab = opt_stateParams['tab'];
+    }
+};
 
 /**
  * Transforms items fetched by API items provider. The
@@ -89,16 +107,16 @@ const FlowsListController = function(
 FlowsListController.prototype.transformItems = function(items) {
   angular.forEach(items, function(item, index) {
     var state = 'BROKEN';
-    if (angular.isDefined(item['context']['state'])) {
-      state = item['context']['state'];
+    if (angular.isDefined(item['state'])) {
+      state = item['state'];
     }
 
     var last_active_at = 0;
-    if (angular.isDefined(item['context']['create_time'])) {
-      last_active_at = item['context']['create_time'];
+    if (angular.isDefined(item['create_time'])) {
+      last_active_at = item['create_time'];
     }
 
-    item[TABLE_KEY_NAME] = item['flow_id'];
+    item[TABLE_KEY_NAME] = item['session_id'];
     item[TABLE_ROW_HASH] = [state, last_active_at];
   }.bind(this));
 
@@ -112,8 +130,8 @@ FlowsListController.prototype.transformItems = function(items) {
  * @export
  */
 FlowsListController.prototype.selectItem = function(item) {
-  this.selectedFlowId = item['flow_id'];
-  this.scope_['selectedFlowState'] = item['context']['state'];
+  this.selectedFlowId = item['session_id'];
+  this.scope_['selectedFlowState'] = item['state'];
 };
 
 /**
@@ -140,7 +158,7 @@ exports.FlowsListDirective = function() {
           clientId: '=',
         },
         restrict: 'E',
-        templateUrl: '/static/angular-components/flow/flows-list.html',
+        templateUrl: window.base_path+'/static/angular-components/flow/flows-list.html',
         controller: FlowsListController,
     controllerAs: 'controller'
     };

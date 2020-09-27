@@ -1,3 +1,5 @@
+// +build !aix
+
 /*
    Velociraptor - Hunting Evil
    Copyright (C) 2019 Velocidex Innovations.
@@ -20,16 +22,18 @@ package main
 import (
 	"bytes"
 	"compress/zlib"
+	"encoding/binary"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"regexp"
 
-	"github.com/Velocidex/yaml"
+	"github.com/Velocidex/yaml/v2"
 	errors "github.com/pkg/errors"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
-	artifacts "www.velocidex.com/golang/velociraptor/artifacts"
 	"www.velocidex.com/golang/velociraptor/config"
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/services"
 )
 
 var (
@@ -43,25 +47,27 @@ var (
 		"config_file", "The filename to write into the binary.").
 		Required().String()
 
+	repack_command_append = repack_command.Flag(
+		"append", "If provided we append the file to the output binary.").
+		File()
+
 	repack_command_output = repack_command.Arg(
 		"output", "The filename to write the repacked binary.").
 		Required().String()
 
-	embedded_re = regexp.MustCompile(`#{3}<Begin Embedded Config>\n`)
+	embedded_re = regexp.MustCompile(`#{3}<Begin Embedded Config>\r?\n`)
 )
 
-func validate_config(config_data []byte) error {
-	// Validate the string by parsing it as a config proto.
-	test_config := config.GetDefaultConfig()
-	err := yaml.UnmarshalStrict(config_data, test_config)
-	if err != nil {
-		return err
-	}
+// Validate any embedded artifacts to make sure they compile properly.
+func validate_config(config_obj *config_proto.Config) error {
+	if config_obj.Autoexec != nil {
+		manager, err := services.GetRepositoryManager()
+		if err != nil {
+			return err
+		}
+		repository := manager.NewRepository()
 
-	if test_config.Autoexec != nil {
-		repository := artifacts.NewRepository()
-
-		for _, definition := range test_config.Autoexec.ArtifactDefinitions {
+		for _, definition := range config_obj.Autoexec.ArtifactDefinitions {
 			serialized, err := yaml.Marshal(definition)
 			if err != nil {
 				return err
@@ -80,20 +86,28 @@ func validate_config(config_data []byte) error {
 }
 
 func doRepack() {
+	config_obj, err := new(config.Loader).WithFileLoader(*repack_command_config).
+		LoadAndValidate()
+	kingpin.FatalIfError(err, "Unable to open config file")
+
+	sm, err := startEssentialServices(config_obj)
+	kingpin.FatalIfError(err, "Starting services.")
+	defer sm.Close()
+
+	err = validate_config(config_obj)
+	kingpin.FatalIfError(err, "Validating config.")
+
 	config_fd, err := os.Open(*repack_command_config)
 	kingpin.FatalIfError(err, "Unable to open config file")
 
 	config_data, err := ioutil.ReadAll(config_fd)
-	kingpin.FatalIfError(err, "Unable to read config file")
+	kingpin.FatalIfError(err, "Unable to open config file")
 
-	// Validate the string by parsing it as a config proto.
-	err = validate_config(config_data)
-	kingpin.FatalIfError(err, "Config file invalid")
-
-	// Compres1s the string.
+	// Compress the string.
 	var b bytes.Buffer
 	w := zlib.NewWriter(&b)
-	w.Write(config_data)
+	_, err = w.Write(config_data)
+	kingpin.FatalIfError(err, "Unable to write")
 	w.Close()
 
 	if b.Len() > len(config.FileConfigDefaultYaml)-40 {
@@ -120,14 +134,43 @@ func doRepack() {
 	outfd, err := os.OpenFile(*repack_command_output,
 		os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
 	kingpin.FatalIfError(err, "Unable to create output file")
-	defer outfd.Close()
 
 	data, err := ioutil.ReadAll(fd)
 	kingpin.FatalIfError(err, "Unable to read executable")
 
+	if *repack_command_append != nil {
+		// A PE file - adjust the size of the .rsrc section to
+		// cover the entire binary.
+		if string(data[0:2]) == "MZ" {
+			stat, err := (*repack_command_append).Stat()
+			kingpin.FatalIfError(err, "Unable to read appended file")
+
+			end_of_file := int64(len(data)) + stat.Size()
+
+			// This is the IMAGE_SECTION_HEADER.Name which
+			// is also the start of IMAGE_SECTION_HEADER.
+			offset_to_rsrc := bytes.Index(data, []byte(".rsrc"))
+
+			// Found it.
+			if offset_to_rsrc > 0 {
+				// IMAGE_SECTION_HEADER.PointerToRawData is a 32 bit int.
+				start_of_rsrc_section := binary.LittleEndian.Uint32(
+					data[offset_to_rsrc+20:])
+				size_of_raw_data := uint32(end_of_file) - start_of_rsrc_section
+				binary.LittleEndian.PutUint32(
+					data[offset_to_rsrc+16:], size_of_raw_data)
+			}
+		}
+
+		appended, err := ioutil.ReadAll(*repack_command_append)
+		kingpin.FatalIfError(err, "Unable to read appended file")
+
+		data = append(data, appended...)
+	}
+
 	match := embedded_re.FindIndex(data)
 	if match == nil {
-		kingpin.Fatalf("I can not seem to locate the embedding config????")
+		kingpin.Fatalf("I can not seem to locate the embedded config????")
 	}
 
 	end := match[1]
@@ -140,6 +183,12 @@ func doRepack() {
 
 	_, err = outfd.Write(data[end+len(config_data):])
 	kingpin.FatalIfError(err, "Writing")
+
+	err = outfd.Close()
+	kingpin.FatalIfError(err, "Writing")
+
+	err = os.Chmod(outfd.Name(), 0777)
+	kingpin.FatalIfError(err, "Chmod")
 }
 
 func init() {

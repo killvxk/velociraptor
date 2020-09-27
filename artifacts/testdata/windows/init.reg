@@ -9,3 +9,9 @@ Windows Registry Editor Version 5.00
 
 [HKEY_CURRENT_USER\Software\Sysinternals\PsExec]
 "EulaAccepted"=1
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\PortProxy\v4tov4\tcp]
+"0.0.0.0/3389"="192.168.1.27/443"
+
+[HKEY_USERS\S-1-5-18\http://www.google.com]
+"\\a\\b\\c\\d"="Foobar"

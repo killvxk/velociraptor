@@ -19,7 +19,10 @@ package functions
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 
+	"github.com/Velocidex/ordereddict"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -32,7 +35,7 @@ type IntFunction struct{}
 
 func (self *IntFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &IntArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -41,16 +44,25 @@ func (self *IntFunction) Call(ctx context.Context,
 	}
 
 	switch t := arg.Int.(type) {
+	case string:
+		result, _ := strconv.ParseInt(t, 0, 64)
+		return result
+
 	case float64:
 		return int64(t)
+
 	case int:
 		return int64(t)
+
 	case int64:
 		return int64(t)
+
 	case uint64:
 		return int64(t)
+
 	case uint32:
 		return uint64(t)
+
 	}
 
 	return 0
@@ -72,7 +84,7 @@ type StrFunction struct{}
 
 func (self *StrFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &StrFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -88,7 +100,7 @@ func (self *StrFunction) Call(ctx context.Context,
 		return string(t)
 
 	default:
-		return t
+		return fmt.Sprintf("%v", t)
 	}
 }
 

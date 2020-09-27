@@ -6,6 +6,7 @@
           type="button"
           class="btn btn-default"
           title="Update server monitoring table"
+          ng-disabled="!controller.uiTraits.Permissions.collect_server"
           ng-click="controller.updateServerMonitoringTable()"
           >
           <i class="fa fa-edit"></i>
@@ -22,7 +23,7 @@
               ng-model="artifact"
               role="menu" aria-labelledby="single-button">
             <li role="menuitem"
-                ng-repeat="artifact in controller.artifacts.logs track by $index"
+                ng-repeat="artifact in controller.artifacts track by $index"
                 >
               <a href ng-click="controller.selectArtifact(artifact)">
                 {{ artifact.artifact }}
@@ -39,7 +40,7 @@
                  is-open="controller.opened"
                  datepicker-options="controller.dateOptions"
                  ng-required="true"
-                 close-text="Close" />
+                 close-text="Close"></input>
           <span class="input-group-btn">
             <button type="button"
                     class="btn btn-default"

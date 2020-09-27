@@ -17,7 +17,7 @@ const {clientModule} = goog.require('grrUi.client.client');
 const {configModule} = goog.require('grrUi.config.config');
 const {coreModule} = goog.require('grrUi.core.core');
 const {flowModule} = goog.require('grrUi.flow.flow');
-const {formsModule} = goog.require('grrUi.forms.forms');
+// const {formsModule} = goog.require('grrUi.forms.forms');
 const {huntModule} = goog.require('grrUi.hunt.hunt');
 /**
  * localModule is empty by default and can be used for deployment-specific
@@ -25,29 +25,29 @@ const {huntModule} = goog.require('grrUi.hunt.hunt');
  */
 const {localModule} = goog.require('grrUi.local.local');
 const {routingModule} = goog.require('grrUi.routing.routing');
-const {semanticModule} = goog.require('grrUi.semantic.semantic');
+const {utilsModule} = goog.require('grrUi.utils.utils');
 const {sidebarModule} = goog.require('grrUi.sidebar.sidebar');
 const {userModule} = goog.require('grrUi.user.user');
-
+const {notebookModule} = goog.require('grrUi.notebook.notebook');
 
 /**
  * Main GRR UI application module.
  */
 exports.appControllerModule = angular.module('grrUi.appController', [
-//  aclModule.name,
-  artifactModule.name,
-  clientModule.name,
-  configModule.name,
-  coreModule.name,
-  flowModule.name,
-  formsModule.name,
-  huntModule.name,
-  localModule.name,
-  routingModule.name,
-  semanticModule.name,
-  sidebarModule.name,
-  templatesModule.name,
-  userModule.name,
+    artifactModule.name,
+    clientModule.name,
+    configModule.name,
+    coreModule.name,
+    flowModule.name,
+//    formsModule.name,
+    huntModule.name,
+    localModule.name,
+    routingModule.name,
+    utilsModule.name,
+    sidebarModule.name,
+    templatesModule.name,
+    userModule.name,
+    notebookModule.name,
 ]);
 
 /**
@@ -94,25 +94,19 @@ exports.appControllerModule.config(function(
 });
 
 exports.appControllerModule.run(function(
-    $injector, $http, $cookies, grrApiService, grrReflectionService) {
+    $injector, $http, $cookies, grrApiService) {
 
     // Ensure CSRF token is in place for Angular-initiated HTTP requests.
-  $http.defaults.headers.post['X-CSRFToken'] = $cookies.get('csrftoken');
-  $http.defaults.headers.delete = $http.defaults.headers.patch = {
-    'X-CSRFToken': $cookies.get('csrftoken')
-  };
+    $http.defaults.headers.post['X-CSRFToken'] = $cookies.get('csrftoken');
+    $http.defaults.headers.delete = $http.defaults.headers.patch = {
+        'X-CSRFToken': $cookies.get('csrftoken')
+    };
 
     grrApiService.markAuthDone();
 
-  // Call reflection service as soon as possible in the app lifetime to cache
-  // the values. "ACLToken" is picked up here as an arbitrary name.
-  // grrReflectionService loads all RDFValues definitions on first request
-  // and then caches them.
-  grrReflectionService.getRDFValueDescriptor('ACLToken');
-
-  // Propagate the globals to the root scope. This makes them
-  // available in templates.
-  $injector.get("$rootScope").globals = window.globals;
+    // Propagate the globals to the root scope. This makes them
+    // available in templates.
+    $injector.get("$rootScope").globals = window.globals;
 });
 
 
@@ -120,7 +114,7 @@ exports.appControllerModule.run(function(
  * Hardcoding jsTree themes folder so that it works correctly when used
  * from a JS bundle file.
  */
-$['jstree']['_themes'] = '/static/third-party/jstree/themes/';
+$['jstree']['_themes'] = window.base_path+'/static/third-party/jstree/themes/';
 
 
 /**

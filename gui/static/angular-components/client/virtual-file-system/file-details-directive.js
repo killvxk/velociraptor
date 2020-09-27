@@ -13,9 +13,11 @@ const {REFRESH_FILE_EVENT} = goog.require('grrUi.client.virtualFileSystem.events
  * @ngInject
  */
 const FileDetailsController = function(
-    $scope, grrApiService) {
+  $rootScope, $scope, grrApiService) {
   /** @private {!angular.Scope} */
   this.scope_ = $scope;
+
+  this.rootScope_ = $rootScope;
 
   /** @private {!grrUi.core.apiService.ApiService} */
   this.grrApiService_ = grrApiService;
@@ -32,6 +34,9 @@ const FileDetailsController = function(
   this.params;
 
   this.reporting_params = {};
+
+  this.rootScope_.$on(REFRESH_FILE_EVENT,
+                      this.onFilePathChange_.bind(this));
 
   this.scope_.$watch('controller.fileContext.selectedFilePath',
                      this.onFilePathChange_.bind(this));
@@ -64,10 +69,9 @@ FileDetailsController.prototype.onFilePathChange_ = function(newValue) {
     var download = this.fileContext.selectedRow.Download;
     this.fileHasContent = angular.isObject(download);
 
-    // Normalize path to contain only single / path separators.
-    var filePath = this.fileContext.selectedFilePath.replace(/\/+/g,"/");
+    var filePath = this.fileContext.selectedFilePath;
     this.params = {
-        path: filePath,
+        path: '/clients/' + this.fileContext.clientId + '/' + filePath,
         client_id: this.fileContext.clientId,
     };
 
@@ -106,30 +110,6 @@ FileDetailsController.prototype.reportingParameters = function() {
         return;
     }
 
-    if (components[1] == "monitoring") {
-        var artifact_name = components[2];
-        var start = this.parseFilenameToTimestamp(components[3]);
-        this.reporting_params = {
-            "artifact": artifact_name,
-            "client_id": this.params["client_id"],
-            "start_time": start,
-            "end_time": start + 60*60*24,
-            type: "MONITORING_DAILY",
-        };
-    }
-
-    if (components[1] == "server_artifacts") {
-        var artifact_name = components[2];
-        var start = this.parseFilenameToTimestamp(components[3]);
-        this.reporting_params = {
-            "artifact": artifact_name,
-            "client_id": this.params["client_id"],
-            "start_time": start,
-            "end_time": start + 60*60*24,
-            type: "SERVER_EVENT",
-        };
-    }
-
     if (components[1] == "artifacts") {
         var artifact_name = components[2];
         var flowId = components[3];
@@ -159,7 +139,7 @@ exports.FileDetailsDirective = function() {
       currentTab: '='
     },
     require: '^grrFileContext',
-    templateUrl: '/static/angular-components/client/virtual-file-system/file-details.html',
+    templateUrl: window.base_path+'/static/angular-components/client/virtual-file-system/file-details.html',
     controller: FileDetailsController,
     controllerAs: 'controller',
     link: function(scope, element, attrs, fileContextController) {

@@ -54,7 +54,9 @@ package server
 import (
 	"context"
 
-	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/artifacts"
 	"www.velocidex.com/golang/velociraptor/constants"
 	"www.velocidex.com/golang/velociraptor/datastore"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
@@ -76,14 +78,20 @@ type SearchPlugin struct{}
 func (self SearchPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
 		defer close(output_chan)
 
+		err := vql_subsystem.CheckAccess(scope, acls.READ_RESULTS)
+		if err != nil {
+			scope.Log("uploads: %s", err)
+			return
+		}
+
 		arg := &SearchPluginArgs{}
-		err := vfilter.ExtractArgs(scope, args, arg)
+		err = vfilter.ExtractArgs(scope, args, arg)
 		if err != nil {
 			scope.Log("search: %v", err)
 			return
@@ -93,8 +101,7 @@ func (self SearchPlugin) Call(
 			arg.Limit = 10000
 		}
 
-		any_config_obj, _ := scope.Resolve("server_config")
-		config_obj, ok := any_config_obj.(*config_proto.Config)
+		config_obj, ok := artifacts.GetServerConfig(scope)
 		if !ok {
 			scope.Log("Command can only run on the server")
 			return
@@ -108,8 +115,11 @@ func (self SearchPlugin) Call(
 		for _, item := range db.SearchClients(
 			config_obj, constants.CLIENT_INDEX_URN,
 			arg.Query, arg.Type, arg.Offset, arg.Limit) {
-
-			output_chan <- vfilter.NewDict().Set("Hit", item)
+			select {
+			case <-ctx.Done():
+				return
+			case output_chan <- ordereddict.NewDict().Set("Hit", item):
+			}
 		}
 	}()
 

@@ -20,8 +20,10 @@ package event_logs
 import (
 	"context"
 
+	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/evtx"
 	"www.velocidex.com/golang/velociraptor/glob"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
@@ -29,6 +31,7 @@ import (
 type _ParseEvtxPluginArgs struct {
 	Filenames []string `vfilter:"required,field=filename,doc=A list of event log files to parse."`
 	Accessor  string   `vfilter:"optional,field=accessor,doc=The accessor to use."`
+	Database  string   `vfilter:"optional,field=messagedb,doc=A Message database from https://github.com/Velocidex/evtx-data."`
 }
 
 type _ParseEvtxPlugin struct{}
@@ -36,7 +39,7 @@ type _ParseEvtxPlugin struct{}
 func (self _ParseEvtxPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
@@ -49,9 +52,27 @@ func (self _ParseEvtxPlugin) Call(
 			return
 		}
 
+		var database *DatabaseEnricher
+		if arg.Database != "" {
+			database, err = NewDatabaseEnricher(arg.Database)
+			if err != nil {
+				scope.Log("parse_evtx: %s", err.Error())
+				return
+			}
+			defer database.Close()
+		}
+
 		for _, filename := range arg.Filenames {
 			func() {
-				accessor, err := glob.GetAccessor(arg.Accessor, ctx)
+				defer utils.RecoverVQL(scope)
+
+				err := vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+				if err != nil {
+					scope.Log("parse_evtx: %s", err)
+					return
+				}
+
+				accessor, err := glob.GetAccessor(arg.Accessor, scope)
 				if err != nil {
 					scope.Log("parse_evtx: %v", err)
 					return
@@ -74,9 +95,32 @@ func (self _ParseEvtxPlugin) Call(
 				for _, chunk := range chunks {
 					records, _ := chunk.Parse(0)
 					for _, i := range records {
-						event_map, ok := i.Event.(map[string]interface{})
-						if ok {
-							output_chan <- event_map["Event"]
+						event_map, ok := i.Event.(*ordereddict.Dict)
+						if !ok {
+							continue
+						}
+						event, pres := event_map.Get("Event")
+						if !pres {
+							continue
+						}
+
+						if database != nil {
+							select {
+							case <-ctx.Done():
+								return
+
+							case output_chan <- database.Enrich(
+								event.(*ordereddict.Dict)):
+							}
+
+						} else {
+							select {
+							case <-ctx.Done():
+								return
+
+							case output_chan <- maybeEnrichEvent(
+								event.(*ordereddict.Dict)):
+							}
 						}
 					}
 				}
@@ -101,10 +145,12 @@ type _WatchEvtxPlugin struct{}
 func (self _WatchEvtxPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
+		defer close(output_chan)
+
 		// Do not close output_chan - The event log service
 		// owns it and it will be closed by it.
 		arg := &_ParseEvtxPluginArgs{}
@@ -114,16 +160,38 @@ func (self _WatchEvtxPlugin) Call(
 			return
 		}
 
+		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+		if err != nil {
+			scope.Log("watch_evtx: %s", err)
+			return
+		}
+
+		// https://go101.org/article/channel-closing.html We
+		// must not close the channel on the receiving side,
+		// just let the receiver cancel then the context is
+		// done. Note that event_channel is not explicitly
+		// closed at all since all its senders will terminate
+		// when the context is done.
+		event_channel := make(chan vfilter.Row)
+
 		// Register the output channel as a listener to the
 		// global event.
 		for _, filename := range arg.Filenames {
-			GlobalEventLogService.Register(
+			cancel := GlobalEventLogService.Register(
 				filename, arg.Accessor,
-				ctx, scope, output_chan)
+				ctx, scope, event_channel)
+			defer cancel()
 		}
 
 		// Wait until the query is complete.
-		<-ctx.Done()
+		for event := range event_channel {
+			select {
+			case <-ctx.Done():
+				return
+
+			case output_chan <- event:
+			}
+		}
 	}()
 
 	return output_chan

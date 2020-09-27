@@ -54,7 +54,7 @@ exports.routingModule
         title: 'Home',
       })
       .state('home', {
-        url: '',
+        url: '/',
         template: '<grr-user-dashboard />',
         title: 'Home',
       })
@@ -69,7 +69,6 @@ exports.routingModule
           }
         }
       })
-
       .state('hunts', {
         url: '/hunts/:huntId/:tab',
         template: '<grr-hunts-view />',
@@ -94,11 +93,15 @@ exports.routingModule
       .state('server_events', {
         url: '/server_events',
         template: '<grr-server-events />',
-        title: "Server Events",
+          title: "Server Events",
       })
       .state('server_artifacts', {
-        url: '/server_artifacts',
-        template: '<grr-server-artifacts />',
+        url: '/server_artifacts/:flowId/:tab',
+          template: '<grr-server-artifacts />',
+          params: {
+              flowId: {value: null, squash: true},
+              tab: {value: null, squash: true}
+          },
         title: "Server Artifacts",
       })
       .state('alerts', {
@@ -115,7 +118,7 @@ exports.routingModule
         redirectTo: 'client.hostInfo',
         template: '<div ui-view></div>',
         title: function(params) {
-          return params['clientId'];
+            return params['clientId'];
         }
       })
       .state('client.hostInfo', {
@@ -145,6 +148,19 @@ exports.routingModule
           }
         }
       })
+      .state('welcome', {
+        url: '/welcome',
+        template: '<grr-report-viewer params=\'{"artifact":"Server.Internal.Welcome"}\' />',
+        title: 'Welcome to Velociraptor'
+      })
+      .state('notebook', {
+          url: '/notebook/:notebookId',
+          template: '<grr-notebook />',
+          params: {
+              notebookId: {value: null, squash: true}
+          },
+          title: "Notebook",
+      })
       .state('client.events', {
         url: '/client_events',
         template: '<grr-client-events />',
@@ -158,7 +174,7 @@ exports.routingModule
     var updateTitle = function() {
       var breadcrumbs = [];
       var curState = $state['$current'];
-      while (angular.isDefined(curState)) {
+      while (angular.isObject(curState)) {
         if (angular.isString(curState.title)) {
           breadcrumbs.splice(0, 0, curState.title);
         } else if (angular.isFunction(curState.title)) {
@@ -204,7 +220,8 @@ exports.routingModule
         $location.url(rewrittenUrl);
       }
 
-      $urlRouter.sync();
+        $urlRouter.sync();
+
       // We need to update the title not only when the state changes
       // (see $stateChangeSuccess), but also when individual state's
       // parameters get updated.

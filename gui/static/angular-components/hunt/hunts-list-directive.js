@@ -22,34 +22,45 @@ const {stripAff4Prefix} = goog.require('grrUi.core.utils');
  */
 const HuntsListController = function(
     $scope, $q, $uibModal, grrDialogService, grrApiService) {
-  // Injected dependencies.
+    // Injected dependencies.
 
-  /** @private {!angular.Scope} */
-  this.scope_ = $scope;
+    /** @private {!angular.Scope} */
+    this.scope_ = $scope;
 
-  /** @private {!angular.$q} */
-  this.q_ = $q;
+    /** @private {!angular.$q} */
+    this.q_ = $q;
 
-  /** @private {!angularUi.$uibModal} */
-  this.uibModal_ = $uibModal;
+    /** @private {!angularUi.$uibModal} */
+    this.uibModal_ = $uibModal;
 
-  /** @private {DialogService} */
-  this.grrDialogService_ = grrDialogService;
+    /** @private {DialogService} */
+    this.grrDialogService_ = grrDialogService;
 
-  /** @private {!ApiService} */
+    /** @private {!ApiService} */
     this.grrApiService_ = grrApiService;
 
     /** @type {string} */
-  this.selectedHunt;
+    this.selectedHunt;
 
-  // Internal state.
-  /**
-   * This variable is bound to grr-infinite-table's trigger-update attribute
-   * and therefore is set by that directive to a function that triggers
-   * table update.
-   * @export {function()}
-   */
-  this.triggerUpdate;
+    // Internal state.
+    /**
+     * This variable is bound to grr-infinite-table's trigger-update attribute
+     * and therefore is set by that directive to a function that triggers
+     * table update.
+     * @export {function()}
+     */
+    this.triggerUpdate;
+
+    this.uiTraits = {};
+    this.grrApiService_.getCached('v1/GetUserUITraits').then(function(response) {
+        this.uiTraits = response.data['interface_traits'];
+    }.bind(this), function(error) {
+        if (error['status'] == 403) {
+            this.error = 'Authentication Error';
+        } else {
+            this.error = error['statusText'] || ('Error');
+        }
+    }.bind(this));
 };
 
 /**
@@ -92,15 +103,7 @@ HuntsListController.prototype.wrapApiPromise_ = function(promise, successMessage
           return successMessage;
         }.bind(this),
         function failure(response) {
-          var message = response['data']['message'];
-
-          if (response['status'] === 403) {
-            var subject = response['data']['subject'];
-            var huntId = stripAff4Prefix(subject).split('/')[1];
-
-              //this.grrAclDialogService_.openRequestHuntApprovalDialog(
-              //  huntId, message);
-          }
+          var message = response['data'];
           return this.q_.reject(message);
         }.bind(this));
 };
@@ -118,11 +121,13 @@ HuntsListController.prototype.selectItem = function(item) {
 };
 
 HuntsListController.prototype.huntState = function(item) {
-    if (item.stats.stopped) {
-        return "STOPPED";
-    }
+    if (angular.isObject(item)){
+        if (item.stats.stopped) {
+            return "STOPPED";
+        }
 
-    return item.state;
+        return item.state;
+    }
 };
 
 
@@ -272,15 +277,11 @@ HuntsListController.prototype.deleteHunt = function() {
       this.scope_['selectedHuntId'] = "";
 
       var promise = this.grrApiService_.post(
-        'v1/ModifyHunt', {state: 'ARCHIVED', hunt_id: selectedHuntId});
-
+          'v1/ModifyHunt', {state: 'ARCHIVED', hunt_id: selectedHuntId});
 
       return this.wrapApiPromise_(promise, 'Hunt archived successfully!');
     }.bind(this));
 
-  // TODO(user): there's no need to trigger update on dismiss.
-  // Doing so only to maintain compatibility with legacy GRR code.
-  // Remove as soon as legacy GRR code is removed.
   modalPromise.then(function resolve() {
     this.triggerUpdate();
   }.bind(this), function dismiss() {
@@ -300,7 +301,7 @@ exports.HuntsListDirective = function() {
       selectedHuntId: '=?',
     },
     restrict: 'E',
-    templateUrl: '/static/angular-components/hunt/hunts-list.html',
+    templateUrl: window.base_path+'/static/angular-components/hunt/hunts-list.html',
     controller: HuntsListController,
     controllerAs: 'controller'
   };

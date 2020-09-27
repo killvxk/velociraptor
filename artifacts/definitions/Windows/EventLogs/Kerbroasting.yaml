@@ -1,6 +1,6 @@
 name: Windows.EventLogs.Kerbroasting
 description: |
-
+  **Description**:
   This Artifact will return all successful Kerberos TGS Ticket events for
   Service Accounts (SPN attribute) implemented with weak encryption. These
   tickets are vulnerable to brute force attack and this event is an indicator
@@ -34,18 +34,13 @@ author: Matt Green - @mgreen27
 parameters:
   - name: eventLog
     default: C:\Windows\system32\winevt\logs\Security.evtx
-  - name: accessor
-    default: file
 
 sources:
   - name: Kerbroasting
     queries:
-      - |
-        LET files = SELECT * FROM glob(
-            globs=eventLog,
-            accessor=accessor)
-      - |
-        SELECT timestamp(epoch=System.TimeCreated.SystemTime) As EventTime,
+      - LET files = SELECT * FROM glob(globs=eventLog)
+
+      - SELECT timestamp(epoch=System.TimeCreated.SystemTime) As EventTime,
               System.EventID.Value as EventID,
               System.Computer as Computer,
               EventData.ServiceName as ServiceName,
@@ -72,6 +67,15 @@ sources:
 
 reports:
   - type: CLIENT
+    template: |
+
+      Kerbroasting: TGS Ticket events.
+      ===============================
+
+      {{ .Description }}
+      {{ Query "SELECT EventTime, Computer, ServiceName, TargetUserName, TargetDomainName, IpAddress FROM source(source='Kerbroasting')" | Table }}
+
+  - type: HUNT
     template: |
 
       Kerbroasting: TGS Ticket events.

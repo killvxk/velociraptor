@@ -3,25 +3,20 @@
 goog.module('grrUi.hunt.newHuntWizard.formDirective');
 goog.module.declareLegacyNamespace();
 
-const {ApiService, stripTypeInfo} = goog.require('grrUi.core.apiService');
-const {ReflectionService} = goog.require('grrUi.core.reflectionService');
+const {ApiService} = goog.require('grrUi.core.apiService');
 const {debug} = goog.require('grrUi.core.utils');
 
 /**
  * Controller for FormDirective.
  *
  * @param {!angular.Scope} $scope
- * @param {!ReflectionService} grrReflectionService
  * @param {!ApiService} grrApiService
  * @constructor
  * @ngInject
  */
-const FormController = function($scope, grrReflectionService, grrApiService) {
+const FormController = function($scope, grrApiService, grrAceService) {
     /** @private {!angular.Scope} */
     this.scope_ = $scope;
-
-    /** @private {!ReflectionService} */
-    this.grrReflectionService_ = grrReflectionService;
 
     /** @private {!ApiService} */
     this.grrApiService_ = grrApiService;
@@ -29,21 +24,42 @@ const FormController = function($scope, grrReflectionService, grrApiService) {
     this.names = [];
     this.params = {};
     this.ops_per_second;
-    this.timeout;
-
+    this.timeout = 600;
+    this.expiry = (new Date()).getTime() / 1000 + 7 * 24 * 60 * 60;  // 1 week.
     this.currentPage = 0;
 
+    this.createHuntArgsJson = "";
+
+    this.hunt_conditions = {"excluded": {}};
     if (angular.isUndefined(this.scope_['createHuntArgs'])) {
         this.scope_['createHuntArgs'] = {
-            start_request: {
-                "flow_name": "ArtifactCollector",
-                args: {
-                    "@type": "type.googleapis.com/proto.ArtifactCollectorArgs",
-                },
-            },
-            condition: {},
+            start_request: {},
+            condition: {}
         };
     }
+
+    var self = this;
+
+    this.scope_.aceConfig = function(ace) {
+        self.ace = ace;
+        grrAceService.AceConfig(ace);
+
+        ace.setOptions({
+            autoScrollEditorIntoView: false,
+            maxLines: null,
+        });
+
+        self.scope_.$on('$destroy', function() {
+            grrAceService.SaveAceConfig(ace);
+        });
+
+        ace.resize();
+    };
+
+};
+
+FormController.prototype.showSettings = function() {
+    this.ace.execCommand("showSettingsMenu");
 };
 
 FormController.prototype.onValueChange_ = function(page_index) {
@@ -56,10 +72,23 @@ FormController.prototype.onValueChange_ = function(page_index) {
     }
 
     var createHuntArgs = this.scope_['createHuntArgs'];
-    createHuntArgs.start_request.args.artifacts = {names: this.names};
-    createHuntArgs.start_request.args.parameters = {env: env};
-    createHuntArgs.start_request.args.ops_per_second = this.ops_per_second;
-    createHuntArgs.start_request.args.timeout = this.timeout;
+    createHuntArgs.start_request.artifacts = this.names;
+    createHuntArgs.start_request.parameters = {env: env};
+    createHuntArgs.start_request.ops_per_second = this.ops_per_second;
+    createHuntArgs.start_request.timeout = this.timeout;
+    createHuntArgs.expires = this.expiry * 1000000;
+
+    if (self.hunt_conditions.condition == "labels") {
+        createHuntArgs.condition = {"labels": {"label": [self.hunt_conditions.label]}};
+    } else if(self.hunt_conditions.condition == "os") {
+        createHuntArgs.condition = {"os": {"os": self.hunt_conditions.os}};
+    }
+
+    if (self.hunt_conditions.exclude_condition == "labels") {
+        createHuntArgs.condition.excluded_labels = [self.hunt_conditions.excluded.label];
+    }
+
+    this.createHuntArgsJson = JSON.stringify(createHuntArgs, null, 2);
 };
 
 
@@ -75,6 +104,13 @@ FormController.prototype.sendRequest = function() {
     this.grrApiService_.post('v1/CreateHunt', createHuntArgs)
         .then(function resolve(response) {
             this.serverResponse = response;
+            var onResolve = this.scope_['onResolve'];
+
+            if (onResolve && this.serverResponse) {
+                var huntId = this.serverResponse['data']['flow_id'];
+                onResolve({huntId: huntId});
+            }
+
         }.bind(this), function reject(response) {
             this.serverResponse = response;
             this.serverResponse['error'] = true;
@@ -90,11 +126,6 @@ FormController.prototype.sendRequest = function() {
  * @export
  */
 FormController.prototype.resolve = function() {
-  var onResolve = this.scope_['onResolve'];
-  if (onResolve && this.serverResponse) {
-    var huntId = this.serverResponse['data']['flow_id'];
-    onResolve({huntId: huntId});
-  }
 };
 
 
@@ -113,7 +144,7 @@ exports.FormDirective = function() {
       onReject: '&'
     },
     restrict: 'E',
-    templateUrl: '/static/angular-components/hunt/new-hunt-wizard/form.html',
+    templateUrl: window.base_path+'/static/angular-components/hunt/new-hunt-wizard/form.html',
     controller: FormController,
     controllerAs: 'controller'
   };

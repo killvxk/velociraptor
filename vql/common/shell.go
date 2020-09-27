@@ -26,7 +26,9 @@ import (
 	"sync"
 	"syscall"
 
-	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/artifacts"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
@@ -49,24 +51,27 @@ type ShellPlugin struct{}
 func (self ShellPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
 		defer close(output_chan)
 
+		err := vql_subsystem.CheckAccess(scope, acls.EXECVE)
+		if err != nil {
+			scope.Log("shell: %v", err)
+			return
+		}
+
 		// Check the config if we are allowed to execve at all.
-		scope_config, pres := scope.Resolve("config")
-		if pres {
-			config_obj, ok := scope_config.(*config_proto.ClientConfig)
-			if ok && config_obj.PreventExecve {
-				scope.Log("shell: Not allowed to execve by configuration.")
-				return
-			}
+		config_obj, ok := artifacts.GetConfig(scope)
+		if ok && config_obj.PreventExecve {
+			scope.Log("shell: Not allowed to execve by configuration.")
+			return
 		}
 
 		arg := &ShellPluginArgs{}
-		err := vfilter.ExtractArgs(scope, args, arg)
+		err = vfilter.ExtractArgs(scope, args, arg)
 		if err != nil {
 			scope.Log("shell: %v", err)
 			return
@@ -85,7 +90,11 @@ func (self ShellPlugin) Call(
 			arg.Length = 10240
 		}
 
-		command := exec.CommandContext(ctx, arg.Argv[0], arg.Argv[1:]...)
+		// Kill subprocess when the scope is destroyed.
+		sub_ctx, cancel := context.WithCancel(ctx)
+		scope.AddDestructor(cancel)
+
+		command := exec.CommandContext(sub_ctx, arg.Argv[0], arg.Argv[1:]...)
 		stdout_pipe, err := command.StdoutPipe()
 		if err != nil {
 			scope.Log("shell: no command to run")
@@ -101,9 +110,14 @@ func (self ShellPlugin) Call(
 		err = command.Start()
 		if err != nil {
 			scope.Log("shell: %v", err)
-			output_chan <- &ShellResult{
+			select {
+			case <-ctx.Done():
+				return
+
+			case output_chan <- &ShellResult{
 				ReturnCode: 1,
 				Stderr:     fmt.Sprintf("%v", err),
+			}:
 			}
 			return
 
@@ -113,12 +127,11 @@ func (self ShellPlugin) Call(
 		// to minimize the total number of responses.  Send a
 		// copy of the response because we will continue
 		// modifying it.
-		response := ShellResult{}
-		wg := sync.WaitGroup{}
+		wg := &sync.WaitGroup{}
 
 		read_from_pipe := func(
 			pipe io.ReadCloser,
-			output_member *string,
+			cb func(message string),
 			wg *sync.WaitGroup) {
 
 			defer wg.Done()
@@ -150,25 +163,23 @@ func (self ShellPlugin) Call(
 					// Read some data into the buffer.
 					if n > 0 {
 						offset += n
+						continue
 					}
 
 					if arg.Sep != "" {
 						for _, line := range strings.Split(
 							string(buff[:offset]), arg.Sep) {
-							if len(*output_member) > 0 {
-								output_chan <- response
+							if len(line) > 0 {
+								cb(line)
 							}
-
-							*output_member = line
 						}
 						offset = 0
 
 					} else if n == 0 {
-						if len(*output_member) > 0 {
-							output_chan <- response
+						line := string(buff[:offset])
+						if len(line) > 0 {
+							cb(line)
 						}
-
-						*output_member = string(buff[:offset])
 
 						// Write over the same buffer with new data.
 						offset = 0
@@ -179,50 +190,101 @@ func (self ShellPlugin) Call(
 		}
 
 		// Read asyncronously.
+		var mu sync.Mutex
+		response := &ShellResult{}
+		length := int(arg.Length)
+
 		wg.Add(1)
 		wg.Add(1)
-		go read_from_pipe(stdout_pipe, &response.Stdout, &wg)
-		go read_from_pipe(stderr_pipe, &response.Stderr, &wg)
+		go read_from_pipe(stdout_pipe, func(line string) {
+			mu.Lock()
+			defer mu.Unlock()
 
-		err_chan := make(chan error)
-		go func() {
-			err_chan <- command.Wait()
-		}()
+			if arg.Sep != "" {
+				response.Stdout = line
+				select {
+				case <-ctx.Done():
+					return
 
-		// We need to wait here until the readers are done.
+				case output_chan <- response:
+				}
+			} else {
+				data := response.Stdout + line
+				for len(data) > length {
+					response.Stdout = data[:length]
+					select {
+					case <-ctx.Done():
+						return
+
+					case output_chan <- &ShellResult{
+						Stdout: response.Stdout,
+					}:
+					}
+					data = data[length:]
+				}
+				response.Stdout = data
+			}
+		}, wg)
+		go read_from_pipe(stderr_pipe, func(line string) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			if arg.Sep != "" {
+				response.Stderr = line
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- response:
+				}
+			} else {
+				data := response.Stderr + line
+				for len(data) > length {
+					response.Stderr = data[:length]
+					select {
+					case <-ctx.Done():
+						return
+
+					case output_chan <- &ShellResult{
+						Stderr: response.Stderr,
+					}:
+					}
+					data = data[length:]
+				}
+				response.Stderr = data
+			}
+		}, wg)
+
+		// We need to wait here until the readers are done before calling command.Wait.
 		wg.Wait()
 
+		mu.Lock()
+		defer mu.Unlock()
+
 		// Get the command status and combine with the last response.
-		select {
-		case <-ctx.Done():
-			// Cancelled - kill the child. This does not
-			// seem to work well on windows.
-			err := command.Process.Kill()
-			if err != nil {
-				scope.Log("timeout: failed to kill process with pid %v: %v",
-					command.Process.Pid, err)
-			} else {
-				scope.Log("process killed as timeout reached")
-			}
+		err = command.Wait()
+		if err == nil {
+			// Successful termination.
+			response.ReturnCode = 0
+		} else {
+			response.ReturnCode = -1
 
-		case err := <-err_chan:
-			if err == nil {
-				// Successful termination.
-				response.ReturnCode = 0
-			} else {
-				response.ReturnCode = -1
-
-				exiterr, ok := err.(*exec.ExitError)
+			exiterr, ok := err.(*exec.ExitError)
+			if ok {
+				status, ok := exiterr.Sys().(syscall.WaitStatus)
 				if ok {
-					status, ok := exiterr.Sys().(syscall.WaitStatus)
-					if ok {
-						response.ReturnCode = int64(status.ExitStatus())
-					}
+					response.ReturnCode = int64(status.ExitStatus())
 				}
 			}
 		}
 		response.Complete = true
-		output_chan <- response
+
+		select {
+		case <-ctx.Done():
+			return
+
+		case output_chan <- response:
+		}
 	}()
 
 	return output_chan

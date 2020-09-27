@@ -20,19 +20,19 @@
 package glob
 
 import (
-	"context"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	errors "github.com/pkg/errors"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/vfilter"
 )
 
 type DataFilesystemAccessor struct{}
 
-func (self DataFilesystemAccessor) New(ctx context.Context) FileSystemAccessor {
-	return DataFilesystemAccessor{}
+func (self DataFilesystemAccessor) New(scope *vfilter.Scope) (FileSystemAccessor, error) {
+	return DataFilesystemAccessor{}, nil
 }
 
 func (self DataFilesystemAccessor) Lstat(filename string) (FileInfo, error) {
@@ -44,7 +44,7 @@ func (self DataFilesystemAccessor) ReadDir(path string) ([]FileInfo, error) {
 }
 
 func (self DataFilesystemAccessor) Open(path string) (ReadSeekCloser, error) {
-	return utils.DataReadSeekCloser{strings.NewReader(path)}, nil
+	return utils.DataReadSeekCloser{ReadSeeker: strings.NewReader(path)}, nil
 }
 
 func (self DataFilesystemAccessor) PathSplit(path string) []string {

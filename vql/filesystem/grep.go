@@ -20,11 +20,22 @@ package filesystem
 import (
 	"context"
 	"io"
+	"sync"
 
 	"github.com/Velocidex/ahocorasick"
+	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/glob"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
+)
+
+var (
+	pool = sync.Pool{
+		New: func() interface{} {
+			buffer := make([]byte, 1024*1024) // 1Mb chunks
+			return &buffer
+		},
+	}
 )
 
 type GrepFunctionArgs struct {
@@ -39,7 +50,7 @@ type GrepFunction struct{}
 // The Grep VQL function searches for a literal or regex match inside the file
 func (self *GrepFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &GrepFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -60,9 +71,18 @@ func (self *GrepFunction) Call(ctx context.Context,
 	ah_matcher := ahocorasick.NewMatcher(keywords)
 	offset := 0
 
-	buf := make([]byte, 4*1024*1024) // 4Mb chunks
+	cached_buf := pool.Get().(*[]byte)
+	defer pool.Put(cached_buf)
 
-	fs, err := glob.GetAccessor(arg.Accessor, ctx)
+	buf := *cached_buf
+
+	err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+	if err != nil {
+		scope.Log("grep: %s", err.Error())
+		return false
+	}
+
+	fs, err := glob.GetAccessor(arg.Accessor, scope)
 	if err != nil {
 		scope.Log(err.Error())
 		return false
@@ -75,7 +95,7 @@ func (self *GrepFunction) Call(ctx context.Context,
 	}
 	defer file.Close()
 
-	hits := []*vfilter.Dict{}
+	hits := []*ordereddict.Dict{}
 
 	for {
 		select {
@@ -103,7 +123,7 @@ func (self *GrepFunction) Call(ctx context.Context,
 					max_bound = n
 				}
 
-				hits = append(hits, vfilter.NewDict().
+				hits = append(hits, ordereddict.NewDict().
 					Set("type", "GrepHit").
 					Set("offset", offset+hit).
 					Set("min_bound", min_bound).

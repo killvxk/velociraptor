@@ -5,8 +5,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/evtx"
 	"www.velocidex.com/golang/velociraptor/glob"
+	"www.velocidex.com/golang/velociraptor/utils"
+	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -18,8 +21,8 @@ var (
 	GlobalEventLogService = NewEventLogWatcherService()
 )
 
-// This service watches one or more many event logs files and
-// multiplexes events to multiple readers.
+// This service watches one or more event logs files and multiplexes
+// events to multiple readers.
 type EventLogWatcherService struct {
 	mu sync.Mutex
 
@@ -37,13 +40,15 @@ func (self *EventLogWatcherService) Register(
 	accessor string,
 	ctx context.Context,
 	scope *vfilter.Scope,
-	output_chan chan vfilter.Row) {
+	output_chan chan vfilter.Row) func() {
 
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
+	subctx, cancel := context.WithCancel(ctx)
+
 	handle := &Handle{
-		ctx:         ctx,
+		ctx:         subctx,
 		output_chan: output_chan,
 		scope:       scope}
 
@@ -52,6 +57,7 @@ func (self *EventLogWatcherService) Register(
 	if !pres {
 		registration = []*Handle{}
 		self.registrations[key] = registration
+
 		go self.StartMonitoring(filename, accessor)
 	}
 
@@ -59,14 +65,28 @@ func (self *EventLogWatcherService) Register(
 	self.registrations[key] = registration
 
 	scope.Log("Registering watcher for %v", filename)
+
+	return cancel
 }
 
 // Monitor the filename for new events and emit them to all interested
 // listeners. If no listeners exist we terminate.
 func (self *EventLogWatcherService) StartMonitoring(
-	filename string, accessor string) {
+	filename string, accessor_name string) {
+
+	defer utils.CheckForPanic("StartMonitoring")
+
+	scope := vql_subsystem.MakeScope()
+	defer scope.Close()
+
+	accessor, err := glob.GetAccessor(accessor_name, scope)
+	if err != nil {
+		//scope.Log("Registering watcher error: %v", err)
+		return
+	}
+
 	last_event := self.findLastEvent(filename, accessor)
-	key := filename + accessor
+	key := filename + accessor_name
 	for {
 		self.mu.Lock()
 		registration, pres := self.registrations[key]
@@ -78,7 +98,7 @@ func (self *EventLogWatcherService) StartMonitoring(
 		}
 
 		last_event = self.monitorOnce(
-			filename, accessor, last_event)
+			filename, accessor_name, accessor, last_event)
 
 		time.Sleep(FREQUENCY)
 	}
@@ -86,14 +106,8 @@ func (self *EventLogWatcherService) StartMonitoring(
 
 func (self *EventLogWatcherService) findLastEvent(
 	filename string,
-	accessor_name string) int {
+	accessor glob.FileSystemAccessor) int {
 	last_event := 0
-
-	accessor, err := glob.GetAccessor(
-		accessor_name, context.Background())
-	if err != nil {
-		return 0
-	}
 
 	fd, err := accessor.Open(filename)
 	if err != nil {
@@ -107,6 +121,10 @@ func (self *EventLogWatcherService) findLastEvent(
 	}
 
 	for _, c := range chunks {
+		if c == nil {
+			continue
+		}
+
 		if int(c.Header.LastEventRecID) <= last_event {
 			continue
 		}
@@ -125,6 +143,7 @@ func (self *EventLogWatcherService) findLastEvent(
 func (self *EventLogWatcherService) monitorOnce(
 	filename string,
 	accessor_name string,
+	accessor glob.FileSystemAccessor,
 	last_event int) int {
 
 	self.mu.Lock()
@@ -133,12 +152,6 @@ func (self *EventLogWatcherService) monitorOnce(
 	key := filename + accessor_name
 	handles, pres := self.registrations[key]
 	if !pres {
-		return 0
-	}
-
-	accessor, err := glob.GetAccessor(
-		accessor_name, context.Background())
-	if err != nil {
 		return 0
 	}
 
@@ -169,39 +182,41 @@ func (self *EventLogWatcherService) monitorOnce(
 			if event_id > new_last_event {
 				new_last_event = event_id
 			}
-			event_map, ok := record.Event.(map[string]interface{})
-			if ok {
-				event := event_map["Event"]
-
-				new_handles := make([]*Handle, 0, len(handles))
-				for _, handle := range handles {
-					select {
-					case <-handle.ctx.Done():
-						// Remove and close
-						// handles that are
-						// not currently
-						// active.
-						handle.scope.Log(
-							"Removing watcher for %v",
-							filename)
-						close(handle.output_chan)
-
-					case handle.output_chan <- event:
-						new_handles = append(new_handles, handle)
-					}
-				}
-
-				// No more listeners - we dont care any more.
-				if len(new_handles) == 0 {
-					delete(self.registrations, key)
-					return new_last_event
-				}
-
-				// Update the registrations - possibly
-				// omitting finished listeners.
-				self.registrations[key] = new_handles
-				handles = new_handles
+			event_map, ok := record.Event.(*ordereddict.Dict)
+			if !ok {
+				continue
 			}
+			event, pres := event_map.Get("Event")
+			if !pres {
+				continue
+			}
+
+			new_handles := make([]*Handle, 0, len(handles))
+			for _, handle := range handles {
+				// Pre-calculate this before the
+				// select below to make sure it does
+				// not race it.
+				enriched_event := maybeEnrichEvent(event.(*ordereddict.Dict))
+
+				select {
+				case <-handle.ctx.Done():
+					// If context is done, drop the event.
+
+				case handle.output_chan <- enriched_event:
+					new_handles = append(new_handles, handle)
+				}
+			}
+
+			// No more listeners - we dont care any more.
+			if len(new_handles) == 0 {
+				delete(self.registrations, key)
+				return new_last_event
+			}
+
+			// Update the registrations - possibly
+			// omitting finished listeners.
+			self.registrations[key] = new_handles
+			handles = new_handles
 		}
 	}
 
@@ -210,7 +225,7 @@ func (self *EventLogWatcherService) monitorOnce(
 
 // A handle is given for each interested party. We write the event on
 // to the output_chan unless the context is done. When all interested
-// party are done we may destroy the monitoring go routine and remove
+// parties are done we may destroy the monitoring go routine and remove
 // the registration.
 type Handle struct {
 	ctx         context.Context

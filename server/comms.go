@@ -18,280 +18,90 @@
 package server
 
 import (
-	"context"
-	"crypto/tls"
-	"fmt"
+	"errors"
 	"io"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
-	"os"
-	"os/signal"
-	"sync"
 	"sync/atomic"
 	"time"
 
+	"www.velocidex.com/golang/velociraptor/file_store"
+	"www.velocidex.com/golang/velociraptor/file_store/api"
+	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/juju/ratelimit"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"golang.org/x/crypto/acme/autocert"
+	"github.com/sirupsen/logrus"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
-	"www.velocidex.com/golang/velociraptor/services"
 )
 
 var (
-	healthy            int32
 	currentConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "client_comms_current_connections",
 		Help: "Number of currently connected clients.",
+	})
+
+	redirectedFrontendCounter = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "frontend_redirect_count",
+		Help: "Number of times the frontend redirected.",
+	})
+
+	sendCounter = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "frontend_send_count",
+		Help: "Number of POST requests frontend sent to the client.",
+	})
+
+	receiveCounter = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "frontend_received_count",
+		Help: "Number of POST requests frontend received from the client.",
+	})
+
+	enrollmentCounter = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "frontend_enroll_response",
+		Help: "Number responses to enrol (406).",
+	})
+	urgentCounter = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "frontend_urgent_responses",
+		Help: "Number urgent responses received.",
 	})
 )
 
 func PrepareFrontendMux(
 	config_obj *config_proto.Config,
 	server_obj *Server,
-	router *http.ServeMux) {
-	router.Handle("/healthz", healthz())
-	router.Handle("/server.pem", server_pem(config_obj))
-	router.Handle("/control", control(server_obj))
-	router.Handle("/reader", reader(config_obj, server_obj))
-
-	// FIXME: Use a handler which works on the file store. This
-	// will stop working when we have a distributed file store.
-	if config_obj.Frontend.PublicPath != "" {
-		router.Handle(
-			"/public/", http.StripPrefix("/public/",
-				http.FileServer(http.Dir(
-					config_obj.Frontend.PublicPath,
-				))))
-	}
-}
-
-// Starts the frontend over HTTP. Velociraptor uses its own encryption
-// protocol so using HTTP is quite safe.
-func StartFrontendHttp(
-	config_obj *config_proto.Config,
-	server_obj *Server,
-	router *http.ServeMux) error {
-	listenAddr := fmt.Sprintf(
-		"%s:%d",
-		config_obj.Frontend.BindAddress,
-		config_obj.Frontend.BindPort)
-
-	server := &http.Server{
-		Addr:     listenAddr,
-		Handler:  router,
-		ErrorLog: logging.NewPlainLogger(config_obj, &logging.FrontendComponent),
-
-		// https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/
-		ReadTimeout:  500 * time.Second,
-		WriteTimeout: 900 * time.Second,
-		IdleTimeout:  15 * time.Second,
-	}
-
-	wg := &sync.WaitGroup{}
-	InstallSignalHandler(config_obj, server_obj, server, wg)
-	server_obj.Info("Frontend is ready to handle client requests at %s", listenAddr)
-
-	err := server.ListenAndServe()
-	if err != nil && err != http.ErrServerClosed {
-		return err
-	}
-
-	wg.Wait()
-	server_obj.Info("Server stopped")
-
-	return nil
-}
-
-// Starts the frontend over HTTPS.
-func StartFrontendHttps(
-	config_obj *config_proto.Config,
-	server_obj *Server,
 	router *http.ServeMux) error {
 
-	cert, err := tls.X509KeyPair(
-		[]byte(config_obj.Frontend.Certificate),
-		[]byte(config_obj.Frontend.PrivateKey))
-	if err != nil {
-		return err
+	if config_obj.Frontend == nil {
+		return errors.New("Frontend not configured")
 	}
 
-	listenAddr := fmt.Sprintf(
-		"%s:%d",
-		config_obj.Frontend.BindAddress,
-		config_obj.Frontend.BindPort)
+	base := config_obj.Frontend.BasePath
+	router.Handle(base+"/healthz", healthz(server_obj))
+	router.Handle(base+"/server.pem", server_pem(config_obj))
+	router.Handle(base+"/control", control(server_obj))
+	router.Handle(base+"/reader", reader(config_obj, server_obj))
 
-	server := &http.Server{
-		Addr:     listenAddr,
-		Handler:  router,
-		ErrorLog: logging.NewPlainLogger(config_obj, &logging.FrontendComponent),
-
-		// https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/
-		ReadTimeout:  500 * time.Second,
-		WriteTimeout: 900 * time.Second,
-		IdleTimeout:  15 * time.Second,
-		TLSConfig: &tls.Config{
-			MinVersion:               tls.VersionTLS12,
-			CurvePreferences:         []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
-			Certificates:             []tls.Certificate{cert},
-			PreferServerCipherSuites: true,
-			CipherSuites: []uint16{
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-				tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_RSA_WITH_AES_256_CBC_SHA,
-				tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
-			},
-		},
-	}
-
-	wg := &sync.WaitGroup{}
-	InstallSignalHandler(config_obj, server_obj, server, wg)
-	server_obj.Info("Frontend is ready to handle client TLS requests at %s", listenAddr)
-
-	err = server.ListenAndServeTLS("", "")
-	if err != nil && err != http.ErrServerClosed {
-		return err
-	}
-
-	wg.Wait()
-	server_obj.Info("Server stopped")
+	// Publically accessible part of the filestore. NOTE: this
+	// does not have to be a physical directory - it is served
+	// from the filestore.
+	router.Handle(base+"/public/", GetLoggingHandler(config_obj, "/public")(
+		http.StripPrefix(base, http.FileServer(api.NewFileSystem(config_obj,
+			file_store.GetFileStore(config_obj),
+			"/public/")))))
 
 	return nil
 }
 
-// Install a signal handler which will shutdown the server gracefully.
-func InstallSignalHandler(
-	config_obj *config_proto.Config,
-	server_obj *Server,
-	server *http.Server,
-	wg *sync.WaitGroup) {
-
-	// Wait for signal. When signal is received we shut down the
-	// server.
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt)
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-
-		// Start all the services and shut them down when we
-		// are done.
-		logger := logging.Manager.GetLogger(
-			config_obj, &logging.GUIComponent)
-
-		// When we exit from here, unwind the server.
-		defer func() {
-			atomic.StoreInt32(&healthy, 0)
-
-			// Server must shutdown in a reasonable time.
-			ctx, cancel := context.WithTimeout(
-				context.Background(), 10*time.Second)
-			defer cancel()
-
-			server.SetKeepAlivesEnabled(false)
-			logger.Info("Server is shutting down...")
-
-			// Notify all the currently connected clients we need
-			// to shut down.
-			server_obj.NotificationPool.NotifyAll()
-			err := server.Shutdown(ctx)
-			if err != nil {
-				logger.Error(
-					"Could not gracefully shutdown the server: ",
-					err)
-			}
-		}()
-
-		manager, err := services.StartServices(
-			config_obj,
-			server_obj.NotificationPool)
-		if err != nil {
-			logger.Error("Failed starting services: ", err)
-			return
-		}
-		defer manager.Close()
-
-		// Wait for the signal on this channel then return.
-		<-quit
-	}()
-
-	atomic.StoreInt32(&healthy, 1)
-}
-
-func StartTLSServer(
-	config_obj *config_proto.Config,
-	server_obj *Server,
-	mux *http.ServeMux) error {
-	logger := logging.Manager.GetLogger(config_obj, &logging.GUIComponent)
-
-	if config_obj.GUI.BindPort != 443 {
-		logger.Info("Autocert specified - will listen on ports 443 and 80. "+
-			"I will ignore specified GUI port at %v",
-			config_obj.GUI.BindPort)
-	}
-
-	if config_obj.Frontend.BindPort != 443 {
-		logger.Info("Autocert specified - will listen on ports 443 and 80. "+
-			"I will ignore specified Frontend port at %v",
-			config_obj.GUI.BindPort)
-	}
-
-	cache_dir := config_obj.AutocertCertCache
-	if cache_dir == "" {
-		cache_dir = "/tmp/velociraptor_cache"
-	}
-
-	certManager := autocert.Manager{
-		Prompt:     autocert.AcceptTOS,
-		HostPolicy: autocert.HostWhitelist(config_obj.AutocertDomain),
-		Cache:      autocert.DirCache(cache_dir),
-	}
-
-	server := &http.Server{
-		// ACME protocol requires TLS be served over port 443.
-		Addr:     ":https",
-		Handler:  mux,
-		ErrorLog: logging.NewPlainLogger(config_obj, &logging.FrontendComponent),
-
-		// https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/
-		ReadTimeout:  500 * time.Second,
-		WriteTimeout: 900 * time.Second,
-		IdleTimeout:  15 * time.Second,
-		TLSConfig: &tls.Config{
-			MinVersion:     tls.VersionTLS12,
-			GetCertificate: certManager.GetCertificate,
-		},
-	}
-
-	// We must have port 80 open to serve the HTTP 01 challenge.
-	go http.ListenAndServe(":http", certManager.HTTPHandler(nil))
-
-	wg := &sync.WaitGroup{}
-	InstallSignalHandler(config_obj, server_obj, server, wg)
-
-	server_obj.Info("Frontend is ready to handle client requests using HTTPS")
-	err := server.ListenAndServeTLS("", "")
-	if err != nil && err != http.ErrServerClosed {
-		return err
-	}
-
-	wg.Wait()
-	server_obj.Info("Server stopped")
-	return nil
-}
-
-func healthz() http.Handler {
+func healthz(server_obj *Server) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.LoadInt32(&healthy) == 1 {
+		if atomic.LoadInt32(&server_obj.Healthy) == 1 {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -306,8 +116,27 @@ func server_pem(config_obj *config_proto.Config) http.Handler {
 		flusher, _ := w.(http.Flusher)
 		flusher.Flush()
 
-		w.Write([]byte(config_obj.Frontend.Certificate))
+		_, _ = w.Write([]byte(config_obj.Frontend.Certificate))
 	})
+}
+
+// Redirect client to another active frontend.
+func maybeRedirectFrontend(handler string, w http.ResponseWriter, r *http.Request) bool {
+	_, pres := r.URL.Query()["r"]
+	if pres {
+		return false
+	}
+
+	redirect_url, ok := services.Frontend.GetFrontendURL()
+	if ok {
+		redirectedFrontendCounter.Inc()
+		// We should redirect to another frontend.
+		http.Redirect(w, r, redirect_url, 301)
+		return true
+	}
+
+	// Handle request ourselves.
+	return false
 }
 
 // This handler is used to receive messages from the client to the
@@ -320,17 +149,44 @@ func control(server_obj *Server) http.Handler {
 	logger := logging.GetLogger(server_obj.config, &logging.FrontendComponent)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if maybeRedirectFrontend("control", w, req) {
+			return
+		}
+
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			panic("http handler is not a flusher")
 		}
 
-		server_obj.StartConcurrencyControl()
-		defer server_obj.EndConcurrencyControl()
+		receiveCounter.Inc()
 
-		body, err := ioutil.ReadAll(
-			io.LimitReader(req.Body, int64(server_obj.config.
-				Frontend.MaxUploadSize*2)))
+		priority := req.Header.Get("X-Priority")
+		// For urgent messages skip concurrency control - This
+		// allows clients with urgent messages to always be
+		// processing even when the frontend are loaded.
+		if priority != "urgent" {
+			server_obj.StartConcurrencyControl()
+			defer server_obj.EndConcurrencyControl()
+		} else {
+			urgentCounter.Inc()
+		}
+
+		reader := io.LimitReader(req.Body, int64(server_obj.config.
+			Frontend.MaxUploadSize*2))
+
+		if server_obj.config.Frontend.PerClientUploadRate > 0 {
+			bucket := ratelimit.NewBucketWithRate(
+				float64(server_obj.config.Frontend.PerClientUploadRate),
+				100*1024)
+			reader = ratelimit.Reader(reader, bucket)
+		}
+
+		if server_obj.Bucket != nil {
+			reader = ratelimit.Reader(reader, server_obj.Bucket)
+		}
+
+		body, err := ioutil.ReadAll(reader)
+
 		if err != nil {
 			logger.Debug("Unable to read body from %v: %+v (read %v)",
 				req.RemoteAddr, err, len(body))
@@ -365,12 +221,15 @@ func control(server_obj *Server) http.Handler {
 				// can not encrypt for it), we
 				// indicate this by providing it with
 				// an HTTP error code.
+				enrollmentCounter.Inc()
+				logger.Debug("Please Enrol (%v)", message_info.Source)
 				http.Error(
 					w,
 					"Please Enrol",
 					http.StatusNotAcceptable)
 			} else {
 				server_obj.Error("Unable to process", err)
+				logger.Debug("Unable to process (%v)", message_info.Source)
 				http.Error(w, "", http.StatusServiceUnavailable)
 			}
 			return
@@ -383,6 +242,7 @@ func control(server_obj *Server) http.Handler {
 		// do this by streaming pad packets to the client,
 		// while the flow is processed.
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
 
@@ -414,11 +274,11 @@ func control(server_obj *Server) http.Handler {
 		for {
 			select {
 			case response := <-sync:
-				w.Write(response)
+				_, _ = w.Write(response)
 				return
 
 			case <-time.After(3 * time.Second):
-				w.Write(serialized_pad)
+				_, _ = w.Write(serialized_pad)
 				flusher.Flush()
 			}
 		}
@@ -436,12 +296,19 @@ func reader(config_obj *config_proto.Config, server_obj *Server) http.Handler {
 	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+
+		if maybeRedirectFrontend("reader", w, req) {
+			return
+		}
+
 		ctx := req.Context()
 
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			panic("http handler is not a flusher")
 		}
+
+		sendCounter.Inc()
 
 		// Keep track of currently connected clients.
 		currentConnections.Inc()
@@ -474,14 +341,17 @@ func reader(config_obj *config_proto.Config, server_obj *Server) http.Handler {
 		// Get a notification for this client from the pool -
 		// Must be before the Process() call to prevent race.
 		source := message_info.Source
-		notification, err := server_obj.NotificationPool.Listen(source)
-		if err != nil {
+
+		if services.GetNotifier().IsClientConnected(source) {
 			http.Error(w, "Another Client connection exists. "+
 				"Only a single instance of the client is "+
 				"allowed to connect at the same time.",
 				http.StatusConflict)
 			return
 		}
+
+		notification, cancel := services.GetNotifier().ListenForNotification(source)
+		defer cancel()
 
 		// Deadlines are designed to ensure that connections
 		// are not blocked for too long (maybe several
@@ -501,10 +371,6 @@ func reader(config_obj *config_proto.Config, server_obj *Server) http.Handler {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
-
-		// Remove the notification from the pool when we exit
-		// here.
-		defer server_obj.NotificationPool.Notify(source)
 
 		// Check for any requests outstanding now.
 		response, count, err := server_obj.Process(
@@ -562,10 +428,9 @@ func reader(config_obj *config_proto.Config, server_obj *Server) http.Handler {
 				// an empty response to be written and
 				// the connection to be terminated
 				// (case above).
-				server_obj.NotificationPool.Notify(source)
-				logger.Info("reader: Deadline exceeded")
+				cancel()
 
-				// Write a pad message every 3 seconds
+				// Write a pad message every 10 seconds
 				// to keep the conenction alive.
 			case <-time.After(10 * time.Second):
 				_, err := w.Write(serialized_pad)
@@ -578,4 +443,51 @@ func reader(config_obj *config_proto.Config, server_obj *Server) http.Handler {
 			}
 		}
 	})
+}
+
+// Record the status of the request so we can log it.
+type statusRecorder struct {
+	http.ResponseWriter
+	http.Flusher
+	status int
+	error  []byte
+}
+
+func (self *statusRecorder) WriteHeader(code int) {
+	self.status = code
+	self.ResponseWriter.WriteHeader(code)
+}
+
+func (self *statusRecorder) Write(buf []byte) (int, error) {
+	if self.status == 500 {
+		self.error = buf
+	}
+
+	return self.ResponseWriter.Write(buf)
+}
+
+func GetLoggingHandler(config_obj *config_proto.Config,
+	handler string) func(http.Handler) http.Handler {
+	logger := logging.GetLogger(config_obj, &logging.FrontendComponent)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec := &statusRecorder{
+				w,
+				w.(http.Flusher),
+				200, nil}
+
+			defer func() {
+				logger.WithFields(
+					logrus.Fields{
+						"method":     r.Method,
+						"url":        r.URL.Path,
+						"remote":     r.RemoteAddr,
+						"user-agent": r.UserAgent(),
+						"status":     rec.status,
+						"handler":    handler,
+					}).Info("Access to handler")
+			}()
+			next.ServeHTTP(rec, r)
+		})
+	}
 }

@@ -39,7 +39,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"regexp"
@@ -48,6 +47,9 @@ import (
 	"time"
 
 	elasticsearch "github.com/Velocidex/go-elasticsearch/v7"
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/json"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
@@ -70,14 +72,20 @@ type _ElasticPlugin struct{}
 
 func (self _ElasticPlugin) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
 		defer close(output_chan)
 
+		err := vql_subsystem.CheckAccess(scope, acls.COLLECT_SERVER)
+		if err != nil {
+			scope.Log("elastic: %v", err)
+			return
+		}
+
 		arg := _ElasticPluginArgs{}
-		err := vfilter.ExtractArgs(scope, args, &arg)
+		err = vfilter.ExtractArgs(scope, args, &arg)
 		if err != nil {
 			scope.Log("elastic: %v", err)
 			return
@@ -104,8 +112,8 @@ func (self _ElasticPlugin) Call(ctx context.Context,
 			id := time.Now().UnixNano() + int64(i)*100000000
 
 			// Start an uploader on a thread.
-			go upload_rows(scope, output_chan, row_chan, id, &wg,
-				&arg)
+			go upload_rows(ctx, scope, output_chan,
+				row_chan, id, &wg, &arg)
 		}
 
 		wg.Wait()
@@ -114,7 +122,9 @@ func (self _ElasticPlugin) Call(ctx context.Context,
 }
 
 // Copy rows from row_chan to a local buffer and push it up to elastic.
-func upload_rows(scope *vfilter.Scope, output_chan chan vfilter.Row,
+func upload_rows(
+	ctx context.Context,
+	scope *vfilter.Scope, output_chan chan vfilter.Row,
 	row_chan <-chan vfilter.Row,
 	id int64,
 	wg *sync.WaitGroup,
@@ -142,7 +152,7 @@ func upload_rows(scope *vfilter.Scope, output_chan chan vfilter.Row,
 	next_send_time := time.After(wait_time)
 
 	// Flush any remaining rows
-	defer send_to_elastic(scope, output_chan, client, &buf)
+	defer send_to_elastic(ctx, scope, output_chan, client, &buf)
 
 	// Batch sending to elastic: Either
 	// when we get to chuncksize or wait
@@ -157,21 +167,21 @@ func upload_rows(scope *vfilter.Scope, output_chan chan vfilter.Row,
 			// FIXME: Find a better way to interleave id's
 			// to avoid collisions.
 			id = id + 3
-			err := append_row_to_buffer(scope, row, id, &buf, arg)
+			err := append_row_to_buffer(ctx, scope, row, id, &buf, arg)
 			if err != nil {
 				scope.Log("elastic: %v", err)
 				continue
 			}
 
 			if id > next_send_id {
-				send_to_elastic(scope, output_chan,
+				send_to_elastic(ctx, scope, output_chan,
 					client, &buf)
 				next_send_id = id + arg.ChunkSize
 				next_send_time = time.After(wait_time)
 			}
 
 		case <-next_send_time:
-			send_to_elastic(scope, output_chan,
+			send_to_elastic(ctx, scope, output_chan,
 				client, &buf)
 			next_send_id = id + arg.ChunkSize
 			next_send_time = time.After(wait_time)
@@ -179,11 +189,13 @@ func upload_rows(scope *vfilter.Scope, output_chan chan vfilter.Row,
 	}
 }
 
-func append_row_to_buffer(scope *vfilter.Scope,
+func append_row_to_buffer(
+	ctx context.Context,
+	scope *vfilter.Scope,
 	row vfilter.Row, id int64, buf *bytes.Buffer,
 	arg *_ElasticPluginArgs) error {
 
-	row_dict := vfilter.RowToDict(scope, row)
+	row_dict := vfilter.RowToDict(ctx, scope, row)
 	index := arg.Index
 	index_any, pres := row_dict.Get("_index")
 	if pres {
@@ -195,7 +207,9 @@ func append_row_to_buffer(scope *vfilter.Scope,
 	meta := []byte(fmt.Sprintf(
 		`{ "index" : {"_id" : "%d", "_type": "%s", "_index": "%s" } }%s`,
 		id, arg.Type, index, "\n"))
-	data, err := json.Marshal(row_dict)
+
+	opts := vql_subsystem.EncOptsFromScope(scope)
+	data, err := json.MarshalWithOptions(row_dict, opts)
 	if err != nil {
 		return err
 	}
@@ -209,7 +223,9 @@ func append_row_to_buffer(scope *vfilter.Scope,
 	return nil
 }
 
-func send_to_elastic(scope *vfilter.Scope,
+func send_to_elastic(
+	ctx context.Context,
+	scope *vfilter.Scope,
 	output_chan chan vfilter.Row,
 	client *elasticsearch.Client, buf *bytes.Buffer) {
 	b := buf.Bytes()
@@ -226,12 +242,16 @@ func send_to_elastic(scope *vfilter.Scope,
 	response := make(map[string]interface{})
 	b1, err := ioutil.ReadAll(res.Body)
 	if err == nil {
-		json.Unmarshal(b1, &response)
+		_ = json.Unmarshal(b1, &response)
 	}
 
-	output_chan <- vfilter.NewDict().
+	select {
+	case <-ctx.Done():
+		return
+	case output_chan <- ordereddict.NewDict().
 		Set("StatusCode", res.StatusCode).
-		Set("Response", response)
+		Set("Response", response):
+	}
 
 	buf.Reset()
 

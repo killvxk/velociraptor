@@ -36,6 +36,7 @@ import (
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/executor"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 type MockHTTPConnector struct {
@@ -46,8 +47,8 @@ type MockHTTPConnector struct {
 	t         *testing.T
 }
 
-func (self *MockHTTPConnector) GetCurrentUrl() string { return "http://URL/" }
-func (self *MockHTTPConnector) Post(handler string, data []byte) (*http.Response, error) {
+func (self *MockHTTPConnector) GetCurrentUrl(handler string) string { return "http://URL/" + handler }
+func (self *MockHTTPConnector) Post(handler string, data []byte, urgent bool) (*http.Response, error) {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
@@ -64,7 +65,7 @@ func (self *MockHTTPConnector) Post(handler string, data []byte) (*http.Response
 	require.NoError(self.t, err)
 
 	message_info.IterateJobs(context.Background(),
-		func(item *crypto_proto.GrrMessage) {
+		func(ctx context.Context, item *crypto_proto.GrrMessage) {
 			self.received = append(self.received, item.Name)
 		})
 
@@ -117,9 +118,11 @@ func testRingBuffer(
 	// The connector is not connected initially.
 	connector.connected = false
 
-	sender := NewSender(
+	sender, err := NewSender(
 		config_obj, connector, manager, exe, rb, nil, /* enroller */
-		logger, "Sender", "control")
+		logger, "Sender", "control", nil, &utils.RealClock{})
+	assert.NoError(t, err)
+
 	sender.Start(ctx)
 
 	// This message results in a 14 byte message enqueued. The
@@ -171,13 +174,12 @@ func testRingBuffer(
 func TestSender(t *testing.T) {
 	config_obj := config.GetDefaultConfig()
 
-	// Make the ring buffer 10 bytes - this is enough for one
-	// message but no more.
-	config_obj.Client.LocalBuffer.MemorySize = 10
 	config_obj.Client.MaxPoll = 1
 	config_obj.Client.MaxPollStd = 1
 
-	rb := NewRingBuffer(config_obj)
+	// Make the ring buffer 10 bytes - this is enough for one
+	// message but no more.
+	rb := NewRingBuffer(config_obj, 10)
 	testRingBuffer(rb, config_obj, "0123456789", t)
 }
 
@@ -193,11 +195,15 @@ func TestSenderWithFileBuffer(t *testing.T) {
 	// Make the ring buffer 10 bytes - this is enough for one
 	// message but no more.
 	config_obj.Client.LocalBuffer.DiskSize = 10
-	config_obj.Client.LocalBuffer.Filename = tmpfile.Name()
+	config_obj.Client.LocalBuffer.FilenameLinux = tmpfile.Name()
+	config_obj.Client.LocalBuffer.FilenameWindows = tmpfile.Name()
+	config_obj.Client.LocalBuffer.FilenameDarwin = tmpfile.Name()
 	config_obj.Client.MaxPoll = 1
 	config_obj.Client.MaxPollStd = 1
 
-	rb, err := NewFileBasedRingBuffer(config_obj)
+	logger := logging.GetLogger(config_obj, &logging.ClientComponent)
+
+	rb, err := NewFileBasedRingBuffer(config_obj, logger)
 	require.NoError(t, err)
 
 	testRingBuffer(rb, config_obj, "0123456789", t)

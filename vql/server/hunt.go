@@ -22,13 +22,16 @@ package server
 import (
 	"context"
 
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/acls"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
-	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/artifacts"
 	flows_proto "www.velocidex.com/golang/velociraptor/flows/proto"
+	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 
-	"github.com/golang/protobuf/ptypes"
 	"www.velocidex.com/golang/velociraptor/grpc_client"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -43,25 +46,32 @@ type ScheduleHuntFunction struct{}
 
 func (self *ScheduleHuntFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
+
+	err := vql_subsystem.CheckAccess(scope, acls.COLLECT_CLIENT)
+	if err != nil {
+		scope.Log("flows: %s", err)
+		return vfilter.Null{}
+	}
+
 	arg := &ScheduleHuntFunctionArg{}
-	err := vfilter.ExtractArgs(scope, args, arg)
+	err = vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
 		scope.Log("hunt: %s", err.Error())
 		return vfilter.Null{}
 	}
 
-	any_config_obj, _ := scope.Resolve("server_config")
-	config_obj, ok := any_config_obj.(*config_proto.Config)
+	config_obj, ok := artifacts.GetServerConfig(scope)
 	if !ok {
 		scope.Log("Command can only run on the server")
 		return vfilter.Null{}
 	}
 
 	request := &flows_proto.ArtifactCollectorArgs{
-		Artifacts: &flows_proto.Artifacts{
-			Names: arg.Artifacts,
-		}}
+		Creator:    vql_subsystem.GetPrincipal(scope),
+		Artifacts:  arg.Artifacts,
+		Parameters: &flows_proto.ArtifactParameters{},
+	}
 
 	for _, k := range scope.GetMembers(arg.Env) {
 		value, pres := scope.Associative(arg.Env, k)
@@ -79,27 +89,26 @@ func (self *ScheduleHuntFunction) Call(ctx context.Context,
 		}
 	}
 
-	flow_args, _ := ptypes.MarshalAny(request)
 	hunt_request := &api_proto.Hunt{
 		HuntDescription: arg.Description,
-		StartRequest: &flows_proto.FlowRunnerArgs{
-			FlowName: "ArtifactCollector",
-			Args:     flow_args,
-		},
-		State: api_proto.Hunt_RUNNING,
+		StartRequest:    request,
+		State:           api_proto.Hunt_RUNNING,
 	}
 
-	channel := grpc_client.GetChannel(config_obj)
-	defer channel.Close()
+	client, closer, err := grpc_client.Factory.GetAPIClient(ctx, config_obj)
+	if err != nil {
+		scope.Log("hunt: %s", err.Error())
+		return vfilter.Null{}
+	}
+	defer func() { _ = closer() }()
 
-	client := api_proto.NewAPIClient(channel)
-	response, err := client.CreateHunt(context.Background(), hunt_request)
+	response, err := client.CreateHunt(ctx, hunt_request)
 	if err != nil {
 		scope.Log("hunt: %s", err.Error())
 		return vfilter.Null{}
 	}
 
-	return response
+	return json.ConvertProtoToOrderedDict(response)
 }
 
 func (self ScheduleHuntFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
@@ -110,6 +119,66 @@ func (self ScheduleHuntFunction) Info(scope *vfilter.Scope, type_map *vfilter.Ty
 	}
 }
 
+type AddToHuntFunctionArg struct {
+	ClientId string `vfilter:"required,field=ClientId"`
+	HuntId   string `vfilter:"required,field=HuntId"`
+}
+
+type AddToHuntFunction struct{}
+
+func (self *AddToHuntFunction) Call(ctx context.Context,
+	scope *vfilter.Scope,
+	args *ordereddict.Dict) vfilter.Any {
+
+	err := vql_subsystem.CheckAccess(scope, acls.COLLECT_CLIENT)
+	if err != nil {
+		scope.Log("hunt_add: %s", err)
+		return vfilter.Null{}
+	}
+
+	arg := &AddToHuntFunctionArg{}
+	err = vfilter.ExtractArgs(scope, args, arg)
+	if err != nil {
+		scope.Log("hunt_add: %s", err.Error())
+		return vfilter.Null{}
+	}
+
+	config_obj, ok := artifacts.GetServerConfig(scope)
+	if !ok {
+		scope.Log("Command can only run on the server")
+		return vfilter.Null{}
+	}
+
+	journal, _ := services.GetJournal()
+	if journal == nil {
+		return vfilter.Null{}
+	}
+
+	err = journal.PushRowsToArtifact(config_obj,
+		[]*ordereddict.Dict{ordereddict.NewDict().
+			Set("HuntId", arg.HuntId).
+			Set("ClientId", arg.ClientId).
+			Set("Override", true).
+			Set("Participate", true)},
+		"System.Hunt.Participation", arg.ClientId, "")
+	if err != nil {
+		scope.Log("hunt_add: %s", err.Error())
+		return vfilter.Null{}
+	}
+
+	return arg.ClientId
+}
+
+func (self AddToHuntFunction) Info(scope *vfilter.Scope,
+	type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+	return &vfilter.FunctionInfo{
+		Name:    "hunt_add",
+		Doc:     "Assign a client to a hunt.",
+		ArgType: type_map.AddType(scope, &AddToHuntFunctionArg{}),
+	}
+}
+
 func init() {
 	vql_subsystem.RegisterFunction(&ScheduleHuntFunction{})
+	vql_subsystem.RegisterFunction(&AddToHuntFunction{})
 }

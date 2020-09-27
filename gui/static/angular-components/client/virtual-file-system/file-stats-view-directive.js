@@ -4,9 +4,9 @@ goog.module('grrUi.client.virtualFileSystem.fileStatsViewDirective');
 
 const {REFRESH_FILE_EVENT, REFRESH_FOLDER_EVENT} = goog.require('grrUi.client.virtualFileSystem.events');
 const {ServerErrorButtonDirective} = goog.require('grrUi.core.serverErrorButtonDirective');
+const {SplitPathComponents, Join} = goog.require('grrUi.core.utils');
 
 
-var ERROR_EVENT_NAME = ServerErrorButtonDirective.error_event_name;
 var OPERATION_POLL_INTERVAL_MS = 1000;
 
 const FileStatsViewController = function(
@@ -22,8 +22,8 @@ const FileStatsViewController = function(
     /** @type {!grrUi.client.virtualFileSystem.fileContextDirective.FileContextController} */
     this.fileContext;
 
-    /** @type {?string} */
-    this.updateOperationId;
+    /** @type {?object} */
+    this.updateOperation = {};
 
     /** @private {!angular.$q.Promise} */
     this.updateOperationInterval_;
@@ -33,36 +33,80 @@ const FileStatsViewController = function(
 
     this.scope_.$on('$destroy',
                     this.stopMonitorUpdateOperation_.bind(this));
+
+    this.uiTraits = {};
+    this.grrApiService_.getCached('v1/GetUserUITraits').then(function(response) {
+        this.uiTraits = response.data['interface_traits'];
+    }.bind(this), function(error) {
+        if (error['status'] == 403) {
+            this.error = 'Authentication Error';
+        } else {
+            this.error = error['statusText'] || ('Error');
+        }
+    }.bind(this));
+
 };
 
 
 /**
- * Updates the current file.
+ * getAccessorAndPath converts a Velociraptor VFS path into a path
+ * suitable to use on the client.
  *
  * @export
  */
+FileStatsViewController.prototype.getAccessorAndPath = function(path) {
+    var components = SplitPathComponents(path);
+    var accessor = 'file';
+    if (components.length > 0) {
+        accessor = components[0];
+        path = components.slice(1).join("/");
+    }
+
+    if (accessor == 'ntfs' && components.length > 1) {
+        path = components[1] + "\\" + components.slice(2).join("\\");
+    }
+
+    return {accessor: accessor, path: path};
+};
+
 FileStatsViewController.prototype.updateFile = function() {
+  var self = this;
+
   if (this.updateInProgress) {
-    return;
+      self.stopMonitorUpdateOperation_();
+  }
+
+  var current_mtime = 0;
+  if (angular.isObject(this.fileContext) &&
+      angular.isObject(this.fileContext.selectedRow) &&
+      angular.isObject(this.fileContext.selectedRow.Download)) {
+    current_mtime = this.fileContext.selectedRow.Download.mtime;
   }
 
   var clientId = this.fileContext['clientId'];
   var selectedFilePath = this.fileContext['selectedFilePath'];
-  var url = 'v1/LaunchFlow';
+  var components = this.getAccessorAndPath(selectedFilePath);
+
+  var url = 'v1/CollectArtifact';
   var params = {
-    client_id: clientId,
-    flow_name: "VFSDownloadFile",
-    args: {
-      '@type': 'type.googleapis.com/proto.VFSDownloadFileRequest',
-      vfs_path: [selectedFilePath],
-    }
+      client_id: clientId,
+      artifacts: ["System.VFS.DownloadFile"],
+      parameters: {
+          env: [{key: "Path", value: components.path},
+                {key: "Accessor", value: components.accessor}],
+      }
   };
 
   this.updateInProgress = true;
   this.grrApiService_.post(url, params).then(
       function success(response) {
-        this.updateOperationId = response['data']['flow_id'];
-        this.monitorUpdateOperation_();
+        self.updateOperation = {
+            mtime:    current_mtime,
+            path: components.path,
+            accessor: components.accessor,
+            vfs_path: selectedFilePath,
+        };
+        self.monitorUpdateOperation_();
       }.bind(this),
       function failure(response) {
         this.stopMonitorUpdateOperation_();
@@ -87,25 +131,35 @@ FileStatsViewController.prototype.monitorUpdateOperation_ = function() {
  */
 FileStatsViewController.prototype.pollUpdateOperationState_ = function() {
   var clientId = this.fileContext['clientId'];
-  var url = 'v1/GetFlowDetails/' + clientId;
+  var url = 'v1/VFSStatDownload';
   var params = {
-    flow_id: this.updateOperationId,
+      client_id: clientId,
+      path: this.updateOperation.path,
+      accessor: this.updateOperation.accessor,
+      vfs_path: this.updateOperation.vfs_path
   };
   this.grrApiService_.get(url, params).then(
     function success(response) {
-        if (response['data']['context']['state'] != 'RUNNING') {
-            this.rootScope_.$broadcast(REFRESH_FOLDER_EVENT);
-            this.rootScope_.$broadcast(REFRESH_FILE_EVENT);
+      // The mtime changed - stop the polling.
+      var mtime = 0;
+      if (angular.isDefined(response.data.mtime)) {
+        mtime = response.data.mtime;
+      }
 
-            // Force a refresh on the file table which is watching this
-            // parameter.
-            this.fileContext.flowId = this.updateOperationId;
-            this.stopMonitorUpdateOperation_();
-        }
+      if (mtime != this.updateOperation.mtime) {
+
+        this.fileContext.selectedRow.Download = response.data;
+        this.stopMonitorUpdateOperation_();
+
+        // Force a refresh on the file table which is watching this
+        // parameter.
+        this.rootScope_.$broadcast(REFRESH_FOLDER_EVENT);
+        this.rootScope_.$broadcast(REFRESH_FILE_EVENT);
+      }
     }.bind(this),
-      function failure(response) {
-          this.stopMonitorUpdateOperation_();
-      }.bind(this));
+    function failure(response) {
+      this.stopMonitorUpdateOperation_();
+    }.bind(this));
 };
 
 /**
@@ -114,7 +168,7 @@ FileStatsViewController.prototype.pollUpdateOperationState_ = function() {
  * @private
  */
 FileStatsViewController.prototype.stopMonitorUpdateOperation_ = function() {
-  this.updateOperationId = null;
+  this.updateOperation = {};
   this.updateInProgress = false;
   this.interval_.cancel(this.updateOperationInterval_);
 };
@@ -125,26 +179,16 @@ FileStatsViewController.prototype.stopMonitorUpdateOperation_ = function() {
  * @export
  */
 FileStatsViewController.prototype.downloadFile = function() {
+  var filePath = this.fileContext.selectedRow.Download.vfs_path;
   var clientId = this.fileContext['clientId'];
-  var filePath = this.fileContext['selectedFilePath'];
-  var filename = clientId + '/' + filePath;
 
-  // Sanitize filename for download.
-  var url = 'v1/DownloadVFSFile/' + filename.replace(/[^a-zA-Z0-9]+/g, '_');
+  var url = 'v1/DownloadVFSFile';
   var params = {
-    client_id: clientId,
     vfs_path: filePath,
+    client_id: clientId,
   };
   this.grrApiService_.downloadFile(url, params).then(
     function success() {}.bind(this),
-    function failure(response) {
-      if (angular.isUndefined(response.status)) {
-        this.rootScope_.$broadcast(
-          ERROR_EVENT_NAME, {
-            message: 'Couldn\'t download file.'
-          });
-      }
-    }.bind(this)
   );
 };
 
@@ -158,7 +202,7 @@ exports.FileStatsViewDirective = function() {
     restrict: 'E',
     scope: {},
     require: '^grrFileContext',
-    templateUrl: '/static/angular-components/client/virtual-file-system/file-stats-view.html',
+    templateUrl: window.base_path+'/static/angular-components/client/virtual-file-system/file-stats-view.html',
     controller: FileStatsViewController,
     controllerAs: 'controller',
     link: function(scope, element, attrs, fileContextController) {

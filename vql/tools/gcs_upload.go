@@ -6,16 +6,17 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 
 	"cloud.google.com/go/storage"
+	"github.com/Velocidex/ordereddict"
 	"golang.org/x/net/context"
 	"google.golang.org/api/option"
+	"www.velocidex.com/golang/velociraptor/file_store/api"
 	"www.velocidex.com/golang/velociraptor/glob"
+	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
-	"www.velocidex.com/golang/velociraptor/vql/networking"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -32,7 +33,7 @@ type GCSUploadFunction struct{}
 
 func (self *GCSUploadFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 
 	arg := &GCSUploadArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -41,7 +42,13 @@ func (self *GCSUploadFunction) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	accessor, err := glob.GetAccessor(arg.Accessor, ctx)
+	err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+	if err != nil {
+		scope.Log("upload_gcs: %s", err)
+		return vfilter.Null{}
+	}
+
+	accessor, err := glob.GetAccessor(arg.Accessor, scope)
 	if err != nil {
 		scope.Log("upload_gcs: %v", err)
 		return vfilter.Null{}
@@ -82,7 +89,7 @@ func upload_gcs(ctx context.Context, scope *vfilter.Scope,
 	reader io.Reader,
 	projectID, bucket, name string,
 	credentials string) (
-	*networking.UploadResponse, error) {
+	*api.UploadResponse, error) {
 
 	// Cache the bucket handle between invocations.
 	var bucket_handle *storage.BucketHandle
@@ -134,12 +141,12 @@ func upload_gcs(ctx context.Context, scope *vfilter.Scope,
 	n, err := utils.Copy(ctx, utils.NewTee(
 		writer, sha_sum, md5_sum, log_writer), reader)
 	if err != nil {
-		return &networking.UploadResponse{
+		return &api.UploadResponse{
 			Error: err.Error(),
 		}, err
 	}
 
-	return &networking.UploadResponse{
+	return &api.UploadResponse{
 		Path:   name,
 		Size:   uint64(n),
 		Sha256: hex.EncodeToString(sha_sum.Sum(nil)),

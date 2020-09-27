@@ -7,7 +7,6 @@ goog.module.declareLegacyNamespace();
 
 var OPERATION_POLL_INTERVAL_MS = 1000;
 
-
 /**
  * Controller for HostInfoDirective.
  *
@@ -20,53 +19,64 @@ var OPERATION_POLL_INTERVAL_MS = 1000;
  * @ngInject
  */
 const HostInfoController = function(
-    $scope, $interval, grrApiService, grrRoutingService,
+    $scope, $interval, grrApiService, grrRoutingService, $uibModal,
     grrDialogService) {
 
-  /** @private {!angular.Scope} */
-  this.scope_ = $scope;
+    /** @private {!angular.Scope} */
+    this.scope_ = $scope;
 
-  /** @private {!angular.$interval} */
-  this.interval_ = $interval;
+    this.uibModal_ = $uibModal;
 
-  /** @private {!grrUi.core.apiService.ApiService} */
-  this.grrApiService_ = grrApiService;
+    /** @private {!angular.$interval} */
+    this.interval_ = $interval;
 
-  /** @private {!grrUi.routing.routingService.RoutingService} */
-  this.grrRoutingService_ = grrRoutingService;
+    /** @private {!grrUi.core.apiService.ApiService} */
+    this.grrApiService_ = grrApiService;
 
-  /** @private {!grrUi.core.dialogService.DialogService} */
-  this.grrDialogService_ = grrDialogService;
+    /** @private {!grrUi.routing.routingService.RoutingService} */
+    this.grrRoutingService_ = grrRoutingService;
 
-  /** @type {string} */
-  this.clientId;
+    /** @private {!grrUi.core.dialogService.DialogService} */
+    this.grrDialogService_ = grrDialogService;
 
-  /** @export {Object} */
-  this.client;
+    /** @type {string} */
+    this.clientId;
 
-  /** @type {boolean} */
-  this.hasClientAccess;
+    /** @export {Object} */
+    this.client;
 
-  /** @type {number} */
-  this.fetchDetailsRequestId = 0;
+    /** @type {boolean} */
+    this.hasClientAccess;
 
-  /** @type {?string} */
-  this.interrogateOperationId;
+    /** @type {number} */
+    this.fetchDetailsRequestId = 0;
 
-  /** @private {!angular.$q.Promise} */
-  this.interrogateOperationInterval_;
+    /** @type {?string} */
+    this.interrogateOperationId;
 
-  // clientId may be inferred from the URL or passed explicitly as
-  // a parameter.
-  this.grrRoutingService_.uiOnParamsChanged(this.scope_, 'clientId',
-      this.onClientIdChange_.bind(this));
-  this.scope_.$watch('clientId', this.onClientIdChange_.bind(this));
+    /** @private {!angular.$q.Promise} */
+    this.interrogateOperationInterval_;
 
-  // TODO(user): use grrApiService.poll for polling.
-  this.scope_.$on('$destroy',
-                  this.stopMonitorInterrogateOperation_.bind(this));
+    // clientId may be inferred from the URL or passed explicitly as
+    // a parameter.
+    this.grrRoutingService_.uiOnParamsChanged(this.scope_, 'clientId',
+                                              this.onClientIdChange_.bind(this));
+    this.scope_.$watch('clientId', this.onClientIdChange_.bind(this));
 
-  this.report_params = {};
+    // TODO(user): use grrApiService.poll for polling.
+    this.scope_.$on('$destroy',
+                    this.stopMonitorInterrogateOperation_.bind(this));
+
+    this.report_params = {};
+
+    this.mode = "brief";
+
+    this.metadata;
+
+    this.server_metadata;
+
+    // When the metadata changes just save it.
+    this.scope_.$watch('controller.metadata', this.saveClientMetadata_.bind(this));
 };
 
 
@@ -78,11 +88,69 @@ const HostInfoController = function(
  * @private
  */
 HostInfoController.prototype.onClientIdChange_ = function(clientId) {
-  if (angular.isDefined(clientId)) {
-    this.clientId = clientId;
-    this.fetchClientDetails_();
-  }
+    if (angular.isDefined(clientId)) {
+        this.clientId = clientId;
+        this.fetchClientDetails_();
+        this.fetchClientMetadata_();
+    }
 };
+
+HostInfoController.prototype.saveClientMetadata_ = function() {
+    if (angular.isUndefined(this.metadata) ||
+        this.metadata == this.server_metadata) {
+        return;
+    };
+
+    var items = [];
+    var self = this;
+
+    try {
+        var lines = $.csv.parsers.splitLines(self.metadata);
+        for (var i=0; i<lines.length; i++) {
+            if (i==0) {
+            } else {
+                var row = $.csv.toArray(lines[i]);
+                var key = row[0] || "";
+                var value = row[1] || "";
+                items.push({key: key, value: value});
+            }
+        }
+
+        var url = '/v1/SetClientMetadata';
+        var params = {client_id: this.clientId, items: items};
+
+        this.grrApiService_.post(url, params).then(function() {
+            self.fetchClientMetadata_();
+        });
+
+    } catch(e) {};
+};
+
+HostInfoController.prototype.fetchClientMetadata_ = function() {
+    var url = '/v1/GetClientMetadata/' + this.clientId;
+    var params = {};
+    var self = this;
+
+    this.grrApiService_.get(url, params).then(function success(response) {
+        self.metadata = "Key,Value\n";
+        var rows = 0;
+        var items = response.data["items"] || [];
+        for (var i=0; i<items.length; i++) {
+            var key = items[i]["key"] || "";
+            var value = items[i]["value"] || "";
+            if (angular.isDefined(key)) {
+                self.metadata += key + "," + value + "\n";
+                rows += 1;
+            }
+        };
+
+        if (rows == 0) {
+            self.metadata = "Key,Value\n,\n";
+        };
+        self.server_metadata = self.metadata;
+    }.bind(this));
+};
+
 
 /**
  * Fetches the client details.
@@ -95,7 +163,7 @@ HostInfoController.prototype.fetchClientDetails_ = function() {
 
   this.fetchDetailsRequestId += 1;
   var requestId = this.fetchDetailsRequestId;
-  this.grrApiService_.get(url, params).then(function success(response) {
+    this.grrApiService_.get(url, params).then(function success(response) {
     // Make sure that the request that we got corresponds to the
     // arguments we used while sending it. This is needed for cases
     // when bindings change so fast that we send multiple concurrent
@@ -112,7 +180,7 @@ HostInfoController.prototype.fetchClientDetails_ = function() {
       type: 'CLIENT'
     };
 
-  }.bind(this));
+    }.bind(this));
 };
 
 /**
@@ -121,26 +189,20 @@ HostInfoController.prototype.fetchClientDetails_ = function() {
  * @export
  */
 HostInfoController.prototype.interrogate = function() {
-  var url = '/v1/LaunchFlow';
-  var params ={
-    'client_id': this.clientId,
-    'flow_name': 'ArtifactCollector',
-    'args': {
-      '@type': 'type.googleapis.com/proto.ArtifactCollectorArgs',
-      'artifacts': {
-        names: ['Generic.Client.Info'],
-      },
-      allow_custom_overrides: true,
-    }};
+    var url = '/v1/CollectArtifact';
+    var params ={
+        'client_id': this.clientId,
+        'artifacts': ['Generic.Client.Info'],
+    };
 
-  this.grrApiService_.post(url, params).then(
-      function success(response) {
-        this.interrogateOperationId = response['data']['flow_id'];
-        this.monitorInterrogateOperation_();
-      }.bind(this),
-      function failure(response) {
-        this.stopMonitorInterrogateOperation_();
-      }.bind(this));
+    this.grrApiService_.post(url, params).then(
+        function success(response) {
+            this.interrogateOperationId = response['data']['flow_id'];
+            this.monitorInterrogateOperation_();
+        }.bind(this),
+        function failure(response) {
+            this.stopMonitorInterrogateOperation_();
+        }.bind(this));
 };
 
 /**
@@ -160,20 +222,21 @@ HostInfoController.prototype.monitorInterrogateOperation_ = function() {
  * @private
  */
 HostInfoController.prototype.pollInterrogateOperationState_ = function() {
-  var url = 'v1/GetFlowDetails/' + this.clientId;
-  var param = {'flow_id': this.interrogateOperationId};
+    var url = 'v1/GetFlowDetails';
+    var param = {flow_id: this.interrogateOperationId,
+                 client_id: this.clientId};
 
-  this.grrApiService_.get(url, param).then(
-    function success(response) {
-      if (response['data']['context']['state'] != 'RUNNING') {
-        this.stopMonitorInterrogateOperation_();
+    this.grrApiService_.get(url, param).then(
+        function success(response) {
+            if (response['data']['context']['state'] != 'RUNNING') {
+                this.stopMonitorInterrogateOperation_();
 
-        this.fetchClientDetails_();
-      }
-    }.bind(this),
-    function failure(response) {
-      this.stopMonitorInterrogateOperation_();
-    }.bind(this));
+                this.fetchClientDetails_();
+            }
+        }.bind(this),
+        function failure(response) {
+            this.stopMonitorInterrogateOperation_();
+        }.bind(this));
 };
 
 /**
@@ -194,10 +257,10 @@ HostInfoController.prototype.stopMonitorInterrogateOperation_ = function() {
 exports.HostInfoDirective = function() {
   return {
     scope: {
-      'clientId': '=',
+      'clientId': '='
     },
     restrict: 'E',
-    templateUrl: '/static/angular-components/client/host-info.html',
+    templateUrl: window.base_path+'/static/angular-components/client/host-info.html',
     controller: HostInfoController,
     controllerAs: 'controller'
   };

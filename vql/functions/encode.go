@@ -3,10 +3,11 @@ package functions
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"reflect"
 
+	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/file_store/csv"
+	"www.velocidex.com/golang/velociraptor/json"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -20,7 +21,7 @@ type EncodeFunction struct{}
 
 func (self *EncodeFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &EncodeFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -44,13 +45,14 @@ func (self *EncodeFunction) Call(ctx context.Context,
 
 	switch arg.Format {
 	case "", "json":
-		serialized_content, err := json.MarshalIndent(result, "", "")
+		opts := vql_subsystem.EncOptsFromScope(scope)
+		serialized_content, err := json.MarshalIndentWithOptions(result, opts)
 		if err != nil {
 			scope.Log("serialize: %s", err.Error())
 			return vfilter.Null{}
 		}
 
-		return serialized_content
+		return string(serialized_content)
 
 	case "csv":
 		// Not actually a slice.
@@ -71,7 +73,7 @@ func (self *EncodeFunction) Call(ctx context.Context,
 		return buff.String()
 
 	default:
-		scope.Log("encode: Unknown format %s", arg.Format)
+		scope.Log("serialize: Unknown format %s", arg.Format)
 	}
 	return vfilter.Null{}
 }

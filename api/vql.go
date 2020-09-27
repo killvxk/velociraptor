@@ -18,37 +18,37 @@
 package api
 
 import (
-	"io"
-
+	"github.com/Velocidex/ordereddict"
 	context "golang.org/x/net/context"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/file_store/csv"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/services"
+	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
 
 func RunVQL(
 	ctx context.Context,
 	config_obj *config_proto.Config,
-	env *vfilter.Dict,
+	principal string,
+	env *ordereddict.Dict,
 	query string) (*api_proto.GetTableResponse, error) {
 
 	result := &api_proto.GetTableResponse{}
 
-	repository, err := artifacts.GetGlobalRepository(config_obj)
+	manager, err := services.GetRepositoryManager()
 	if err != nil {
 		return nil, err
 	}
-
-	env.Set("server_config", config_obj)
-
-	scope := artifacts.MakeScope(repository).AppendVars(env)
+	scope := manager.BuildScope(services.ScopeBuilder{
+		Config:     config_obj,
+		Env:        env,
+		ACLManager: vql_subsystem.NewServerACLManager(config_obj, principal),
+		Logger:     logging.NewPlainLogger(config_obj, &logging.ToolComponent),
+	})
 	defer scope.Close()
-
-	scope.Logger = logging.NewPlainLogger(config_obj,
-		&logging.ToolComponent)
 
 	vql, err := vfilter.Parse(query)
 	if err != nil {
@@ -76,42 +76,4 @@ func RunVQL(
 	}
 
 	return result, nil
-}
-
-func StoreVQLAsCSVFile(
-	ctx context.Context,
-	config_obj *config_proto.Config,
-	env *vfilter.Dict,
-	query string,
-	writer io.Writer) error {
-
-	repository, err := artifacts.GetGlobalRepository(config_obj)
-	if err != nil {
-		return err
-	}
-
-	env.Set("server_config", config_obj)
-
-	scope := artifacts.MakeScope(repository).AppendVars(env)
-	defer scope.Close()
-
-	scope.Logger = logging.NewPlainLogger(config_obj,
-		&logging.ToolComponent)
-
-	vql, err := vfilter.Parse(query)
-	if err != nil {
-		return err
-	}
-
-	csv_writer := csv.GetCSVAppender(scope, writer, true /* write_headers */)
-	defer csv_writer.Close()
-
-	sub_ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	for row := range vql.Eval(sub_ctx, scope) {
-		csv_writer.Write(row)
-	}
-
-	return nil
 }

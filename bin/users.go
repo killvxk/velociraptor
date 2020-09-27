@@ -19,12 +19,15 @@ package main
 
 import (
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"golang.org/x/crypto/ssh/terminal"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/api/authenticators"
+	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/users"
 )
 
@@ -36,7 +39,8 @@ var (
 	user_add_password = user_add.Arg(
 		"password",
 		"The password. If not specified we read from the terminal.").String()
-	user_add_readonly = user_add.Flag("read_only", "Desginate this user as read only.").Bool()
+	user_add_roles = user_add.Flag("role", "Specify the role for this user.").
+			Required().String()
 
 	user_show      = user_command.Command("show", "Display information about a user")
 	user_show_name = user_show.Arg(
@@ -49,18 +53,31 @@ var (
 )
 
 func doAddUser() {
-	config_obj, err := get_server_config(*config_path)
+	config_obj, err := DefaultConfigLoader.
+		WithRequiredFrontend().
+		WithRequiredUser().LoadAndValidate()
 	kingpin.FatalIfError(err, "Unable to load config file")
+
+	sm, err := startEssentialServices(config_obj)
+	kingpin.FatalIfError(err, "Starting services.")
+	defer sm.Close()
 
 	user_record, err := users.NewUserRecord(*user_add_name)
 	if err != nil {
 		kingpin.FatalIfError(err, "add user:")
 	}
-	user_record.ReadOnly = *user_add_readonly
 
-	if config_obj.GUI.GoogleOauthClientId != "" {
-		fmt.Printf("Authentication will occur via Google - " +
-			"therefore no password needs to be set.")
+	err = acls.GrantRoles(config_obj, *user_add_name,
+		strings.Split(*user_add_roles, ","))
+	kingpin.FatalIfError(err, "Granting roles: ")
+
+	authenticator, err := authenticators.NewAuthenticator(config_obj)
+	kingpin.FatalIfError(err, "Granting roles: ")
+
+	if authenticator.IsPasswordLess() {
+		fmt.Printf("Authentication will occur via %v - "+
+			"therefore no password needs to be set.",
+			config_obj.GUI.Authenticator.Type)
 
 		password := make([]byte, 100)
 		_, err = rand.Read(password)
@@ -79,7 +96,7 @@ func doAddUser() {
 		user_add_password = &password_str
 	}
 
-	user_record.SetPassword(*user_add_password)
+	users.SetPassword(user_record, *user_add_password)
 	err = users.SetUser(config_obj, user_record)
 	if err != nil {
 		kingpin.FatalIfError(
@@ -89,26 +106,35 @@ func doAddUser() {
 }
 
 func doShowUser() {
-	config_obj, err := get_server_config(*config_path)
+	config_obj, err := DefaultConfigLoader.WithRequiredFrontend().LoadAndValidate()
 	kingpin.FatalIfError(err, "Unable to load config file")
+
+	sm, err := startEssentialServices(config_obj)
+	kingpin.FatalIfError(err, "Starting services.")
+	defer sm.Close()
 
 	user_record, err := users.GetUser(config_obj, *user_show_name)
 	kingpin.FatalIfError(err, "Unable to find user %s", *user_show_name)
 
-	s, err := json.MarshalIndent(user_record, "", " ")
+	s, err := json.MarshalIndent(user_record)
 	if err == nil {
 		os.Stdout.Write(s)
 	}
 }
 
 func doLockUser() {
-	config_obj, err := get_server_config(*config_path)
+	config_obj, err := DefaultConfigLoader.WithRequiredFrontend().LoadAndValidate()
 	kingpin.FatalIfError(err, "Unable to load config file")
+
+	sm, err := startEssentialServices(config_obj)
+	kingpin.FatalIfError(err, "Starting services.")
+	defer sm.Close()
 
 	user_record, err := users.GetUser(config_obj, *user_lock_name)
 	kingpin.FatalIfError(err, "Unable to find user %s", *user_lock_name)
 
-	user_record.Lock()
+	user_record.Locked = true
+
 	err = users.SetUser(config_obj, user_record)
 	if err != nil {
 		kingpin.FatalIfError(

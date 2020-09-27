@@ -42,6 +42,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/executor"
 	"www.velocidex.com/golang/velociraptor/http_comms"
 	logging "www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
 
@@ -71,7 +72,13 @@ var (
 )
 
 func doInstall(config_obj *config_proto.Config) (err error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if config_obj.Client.WindowsInstaller == nil {
+		kingpin.Fatalf("WindowsInstaller is not configured.")
+	}
+
 	service_name := config_obj.Client.WindowsInstaller.ServiceName
 	logger := logging.GetLogger(config_obj, &logging.ClientComponent)
 
@@ -287,10 +294,8 @@ func removeService(name string) error {
 }
 
 func doRemove() {
-	config_obj, err := config.LoadClientConfig(*config_path)
-	if err != nil {
-		kingpin.FatalIfError(err, "Unable to load config file")
-	}
+	config_obj, err := DefaultConfigLoader.LoadAndValidate()
+	kingpin.FatalIfError(err, "Unable to load config file")
 
 	logger := logging.GetLogger(config_obj, &logging.ClientComponent)
 	service_name := config_obj.Client.WindowsInstaller.ServiceName
@@ -340,10 +345,20 @@ func loadClientConfig() (*config_proto.Config, error) {
 		config_path = &config_target_path
 	}
 
-	config_obj, err := config.LoadClientConfig(*config_path)
+	config_obj, err := new(config.Loader).WithVerbose(*verbose_flag).
+		WithEmbedded().
+		WithFileLoader(*config_path).
+		WithRequiredClient().
+		WithWriteback().
+		LoadAndValidate()
 	if err != nil {
+		logger := logging.GetLogger(config_obj, &logging.ClientComponent)
+		logger.Info("Failed to load %v will try again soon.\n", *config_path)
+
 		return nil, err
 	}
+
+	executor.SetTempfile(config_obj)
 
 	// Make sure the config is ok.
 	err = crypto.VerifyConfig(config_obj)
@@ -458,6 +473,65 @@ func (self *VelociraptorService) Close() {
 	}
 }
 
+func runOnce(result *VelociraptorService, elog debug.Log) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Spin forever waiting for a config file to be
+	// dropped into place.
+	config_obj, err := loadClientConfig()
+	if err != nil {
+		time.Sleep(10 * time.Second)
+		return
+	}
+
+	manager, err := crypto.NewClientCryptoManager(
+		config_obj, []byte(config_obj.Writeback.PrivateKey))
+	if err != nil {
+		elog.Error(1, fmt.Sprintf(
+			"Can not create crypto: %v", err))
+		time.Sleep(10 * time.Second)
+		return
+	}
+
+	exe, err := executor.NewClientExecutor(ctx, config_obj)
+	if err != nil {
+		elog.Error(1, fmt.Sprintf(
+			"Can not create client: %v", err))
+		time.Sleep(10 * time.Second)
+		return
+	}
+
+	comm, err := http_comms.NewHTTPCommunicator(
+		config_obj,
+		manager,
+		exe,
+		config_obj.Client.ServerUrls,
+		func() { on_error(config_obj) },
+		utils.RealClock{},
+	)
+	if err != nil {
+		elog.Error(1, fmt.Sprintf(
+			"Can not create comms: %v", err))
+		time.Sleep(10 * time.Second)
+		return
+	}
+
+	result.mu.Lock()
+	result.comms = comm
+	result.mu.Unlock()
+
+	// Wait for all services to properly start
+	// before we begin the comms.
+	sm := services.NewServiceManager(ctx, config_obj)
+	defer sm.Close()
+	err = executor.StartServices(sm, manager.ClientId, exe)
+	if err != nil {
+		return
+	}
+	comm.Run(ctx)
+}
+
 func NewVelociraptorService(name string) (*VelociraptorService, error) {
 	elog, err := getLogger(name)
 	if err != nil {
@@ -468,51 +542,8 @@ func NewVelociraptorService(name string) (*VelociraptorService, error) {
 
 	go func() {
 		for {
-			// Spin forever waiting for a config file to be
-			// dropped into place.
-			config_obj, err := loadClientConfig()
-			if err != nil {
-				time.Sleep(10 * time.Second)
-				continue
-			}
-
-			manager, err := crypto.NewClientCryptoManager(
-				config_obj, []byte(config_obj.Writeback.PrivateKey))
-			if err != nil {
-				elog.Error(1, fmt.Sprintf(
-					"Can not create crypto: %v", err))
-				time.Sleep(10 * time.Second)
-				continue
-			}
-
-			exe, err := executor.NewClientExecutor(config_obj)
-			if err != nil {
-				elog.Error(1, fmt.Sprintf(
-					"Can not create client: %v", err))
-				time.Sleep(10 * time.Second)
-				continue
-			}
-
-			comm, err := http_comms.NewHTTPCommunicator(
-				config_obj,
-				manager,
-				exe,
-				config_obj.Client.ServerUrls,
-			)
-			if err != nil {
-				elog.Error(1, fmt.Sprintf(
-					"Can not create comms: %v", err))
-				time.Sleep(10 * time.Second)
-				continue
-			}
-
-			result.mu.Lock()
-			result.comms = comm
-			result.mu.Unlock()
-
-			ctx := context.Background()
-			comm.Run(ctx)
-			return
+			runOnce(result, elog)
+			time.Sleep(10 * time.Second)
 		}
 	}()
 
@@ -524,7 +555,7 @@ func init() {
 		var err error
 		switch command {
 		case installl_command.FullCommand():
-			config_obj, err := config.LoadClientConfig(*config_path)
+			config_obj, err := DefaultConfigLoader.LoadAndValidate()
 			kingpin.FatalIfError(err, "Unable to load config file")
 			logger := logging.GetLogger(config_obj, &logging.ClientComponent)
 
@@ -554,26 +585,26 @@ func init() {
 			}
 
 		case start_command.FullCommand():
-			config_obj, err := config.LoadClientConfig(*config_path)
+			config_obj, err := DefaultConfigLoader.LoadAndValidate()
 			kingpin.FatalIfError(err, "Unable to load config file")
 			err = startService(config_obj.Client.WindowsInstaller.ServiceName)
 
 		case stop_command.FullCommand():
-			config_obj, err := config.LoadClientConfig(*config_path)
+			config_obj, err := DefaultConfigLoader.LoadAndValidate()
 			kingpin.FatalIfError(err, "Unable to load config file")
 			err = controlService(
 				config_obj.Client.WindowsInstaller.ServiceName,
 				svc.Stop, svc.Stopped)
 
 		case pause_command.FullCommand():
-			config_obj, err := config.LoadClientConfig(*config_path)
+			config_obj, err := DefaultConfigLoader.LoadAndValidate()
 			kingpin.FatalIfError(err, "Unable to load config file")
 			err = controlService(
 				config_obj.Client.WindowsInstaller.ServiceName,
 				svc.Pause, svc.Paused)
 
 		case continue_command.FullCommand():
-			config_obj, err := config.LoadClientConfig(*config_path)
+			config_obj, err := DefaultConfigLoader.LoadAndValidate()
 			kingpin.FatalIfError(err, "Unable to load config file")
 			err = controlService(
 				config_obj.Client.WindowsInstaller.ServiceName,

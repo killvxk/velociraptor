@@ -19,24 +19,53 @@ package api
 
 import (
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"time"
 
+	"github.com/golang/protobuf/ptypes/empty"
+	context "golang.org/x/net/context"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"www.velocidex.com/golang/velociraptor/acls"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
-	"www.velocidex.com/golang/velociraptor/constants"
+	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
+	"www.velocidex.com/golang/velociraptor/flows"
+	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/server"
-	urns "www.velocidex.com/golang/velociraptor/urns"
+	"www.velocidex.com/golang/velociraptor/services"
 )
+
+func GetHostname(config_obj *config_proto.Config, client_id string) string {
+	client_path_manager := paths.NewClientPathManager(client_id)
+	db, err := datastore.GetDB(config_obj)
+	if err != nil {
+		return client_id
+	}
+
+	client_info := &actions_proto.ClientInfo{}
+	err = db.GetSubject(config_obj,
+		client_path_manager.Path(), client_info)
+	if err != nil {
+		return client_id
+	}
+
+	return client_info.Hostname
+}
 
 func GetApiClient(
 	config_obj *config_proto.Config,
 	server_obj *server.Server,
 	client_id string, detailed bool) (
 	*api_proto.ApiClient, error) {
+
+	if config_obj.GUI == nil {
+		return nil, errors.New("GUI not configured")
+	}
 
 	result := &api_proto.ApiClient{
 		ClientId: client_id,
@@ -51,23 +80,17 @@ func GetApiClient(
 		return nil, errors.New("client_id must start with C")
 	}
 
-	client_urn := urns.BuildURN("clients", client_id)
+	client_path_manager := paths.NewClientPathManager(client_id)
 	db, err := datastore.GetDB(config_obj)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, label := range db.SearchClients(
-		config_obj, constants.CLIENT_INDEX_URN,
-		client_id, "", 0, 1000) {
-		if strings.HasPrefix(label, "label:") {
-			result.Labels = append(
-				result.Labels, strings.TrimPrefix(label, "label:"))
-		}
-	}
+	result.Labels = services.GetLabeler().GetClientLabels(config_obj, client_id)
 
 	client_info := &actions_proto.ClientInfo{}
-	err = db.GetSubject(config_obj, client_urn, client_info)
+	err = db.GetSubject(config_obj,
+		client_path_manager.Path(), client_info)
 	if err != nil {
 		return nil, err
 	}
@@ -85,9 +108,16 @@ func GetApiClient(
 		Fqdn:    client_info.Fqdn,
 	}
 
-	err = db.GetSubject(
-		config_obj,
-		urns.BuildURN(client_urn, "ping"),
+	public_key_info := &crypto_proto.PublicKey{}
+	err = db.GetSubject(config_obj, client_path_manager.Key().Path(),
+		public_key_info)
+	if err != nil {
+		return nil, err
+	}
+
+	result.FirstSeenAt = public_key_info.EnrollTime
+
+	err = db.GetSubject(config_obj, client_path_manager.Ping().Path(),
 		client_info)
 	if err != nil {
 		return nil, err
@@ -99,7 +129,7 @@ func GetApiClient(
 	// Update the time to now if the client is currently actually
 	// connected.
 	if server_obj != nil &&
-		server_obj.NotificationPool.IsClientConnected(client_id) {
+		services.GetNotifier().IsClientConnected(client_id) {
 		result.LastSeenAt = uint64(time.Now().UnixNano() / 1000)
 	}
 
@@ -115,52 +145,6 @@ func GetApiClient(
 	return result, nil
 }
 
-func LabelClients(
-	config_obj *config_proto.Config,
-	in *api_proto.LabelClientsRequest) (*api_proto.APIResponse, error) {
-	db, err := datastore.GetDB(config_obj)
-	if err != nil {
-		return nil, err
-	}
-
-	index_func := db.SetIndex
-	switch in.Operation {
-	case "remove":
-		index_func = db.UnsetIndex
-	case "check":
-		index_func = db.CheckIndex
-	case "set":
-		// default.
-	default:
-		return nil, errors.New(
-			"unknown label operation. Must be set, check or remove")
-	}
-
-	for _, label := range in.Labels {
-		for _, client_id := range in.ClientIds {
-			if !strings.HasPrefix(label, "label:") {
-				label = "label:" + label
-			}
-			err = index_func(
-				config_obj,
-				constants.CLIENT_INDEX_URN,
-				client_id, []string{label})
-			if err != nil {
-				return nil, err
-			}
-			err = index_func(
-				config_obj,
-				constants.CLIENT_INDEX_URN,
-				label, []string{client_id})
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	return &api_proto.APIResponse{}, nil
-}
-
 func _is_ip_in_ranges(remote string, ranges []string) bool {
 	for _, ip_range := range ranges {
 		_, ipNet, err := net.ParseCIDR(ip_range)
@@ -174,4 +158,94 @@ func _is_ip_in_ranges(remote string, ranges []string) bool {
 	}
 
 	return false
+}
+
+func (self *ApiServer) GetClientMetadata(
+	ctx context.Context,
+	in *api_proto.GetClientRequest) (*api_proto.ClientMetadata, error) {
+
+	user_name := GetGRPCUserInfo(self.config, ctx).Name
+	permissions := acls.READ_RESULTS
+	perm, err := acls.CheckAccess(self.config, user_name, permissions)
+	if !perm || err != nil {
+		return nil, status.Error(codes.PermissionDenied,
+			"User is not allowed to view clients.")
+	}
+
+	client_path_manager := paths.NewClientPathManager(in.ClientId)
+	db, err := datastore.GetDB(self.config)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &api_proto.ClientMetadata{}
+	err = db.GetSubject(self.config, client_path_manager.Metadata(), result)
+	if err != nil && err == io.EOF {
+		// Metadata not set, start with empty set.
+		err = nil
+	}
+	return result, err
+}
+
+func (self *ApiServer) SetClientMetadata(
+	ctx context.Context,
+	in *api_proto.ClientMetadata) (*empty.Empty, error) {
+
+	user_name := GetGRPCUserInfo(self.config, ctx).Name
+	permissions := acls.LABEL_CLIENT
+	perm, err := acls.CheckAccess(self.config, user_name, permissions)
+	if !perm || err != nil {
+		return nil, status.Error(codes.PermissionDenied,
+			"User is not allowed to modify client labels.")
+	}
+
+	client_path_manager := paths.NewClientPathManager(in.ClientId)
+	db, err := datastore.GetDB(self.config)
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.SetSubject(self.config, client_path_manager.Metadata(), in)
+	return &empty.Empty{}, err
+}
+
+func (self *ApiServer) GetClient(
+	ctx context.Context,
+	in *api_proto.GetClientRequest) (*api_proto.ApiClient, error) {
+
+	user_name := GetGRPCUserInfo(self.config, ctx).Name
+	permissions := acls.READ_RESULTS
+	perm, err := acls.CheckAccess(self.config, user_name, permissions)
+	if !perm || err != nil {
+		return nil, status.Error(codes.PermissionDenied,
+			"User is not allowed to view clients.")
+	}
+
+	api_client, err := GetApiClient(
+		self.config,
+		self.server_obj,
+		in.ClientId,
+		!in.Lightweight, // Detailed
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return api_client, nil
+}
+
+func (self *ApiServer) GetClientFlows(
+	ctx context.Context,
+	in *api_proto.ApiFlowRequest) (*api_proto.ApiFlowResponse, error) {
+
+	user_name := GetGRPCUserInfo(self.config, ctx).Name
+	permissions := acls.READ_RESULTS
+	perm, err := acls.CheckAccess(self.config, user_name, permissions)
+	if !perm || err != nil {
+		return nil, status.Error(codes.PermissionDenied,
+			"User is not allowed to view flows.")
+	}
+
+	return flows.GetFlows(self.config, in.ClientId,
+		in.IncludeArchived, in.Offset, in.Count)
 }

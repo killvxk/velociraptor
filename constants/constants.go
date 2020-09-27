@@ -20,26 +20,27 @@ package constants
 import "regexp"
 
 const (
-	VERSION                    = "0.3.5"
-	ENROLLMENT_WELL_KNOWN_FLOW = "aff4:/flows/E:Enrol"
+	VERSION                    = "0.5.0"
+	ENROLLMENT_WELL_KNOWN_FLOW = "E:Enrol"
 	MONITORING_WELL_KNOWN_FLOW = FLOW_PREFIX + "Monitoring"
 
-	// Temporary attribute
-	AFF4_ATTR = "aff4:data"
-
 	FLOW_PREFIX             = "F."
-	FOREMAN_WELL_KNOWN_FLOW = "aff4:/flows/E.Foreman"
+	FOREMAN_WELL_KNOWN_FLOW = "E.Foreman"
 	HUNT_PREFIX             = "H."
 
 	// The GUI uses this as the client index.
 	CLIENT_INDEX_URN = "/client_index/"
 
-	USER_URN = "/users/"
+	// An index of all the hunts and clients.
+	HUNT_INDEX     = "/hunt_index/"
+	NOTEBOOK_INDEX = "/notebook_index/"
+	USER_URN       = "/users/"
 
 	// Well known flows - Request ID:
 	LOG_SINK uint64 = 980
 
 	TransferWellKnownFlowId = 5
+	ProcessVQLResponses     = 1
 
 	// Largest buffer we use for comms.
 	MAX_MEMORY    = 5 * 1024 * 1024
@@ -55,12 +56,32 @@ const (
 	// monitoring artifacts.
 	ServerMonitoringFlowURN = "/config/server_monitoring.json"
 	ClientMonitoringFlowURN = "/config/client_monitoring.json"
+	ThirdPartyInventory     = "/config/inventory.json"
 
 	USER_AGENT = "Velociraptor - Dig Deeper!"
 
 	// Internal artifact names.
 	CLIENT_INFO_ARTIFACT = "Generic.Client.Info"
+
+	// Globals set in VQL scopes.
+	SCOPE_CONFIG        = "config"
+	SCOPE_SERVER_CONFIG = "server_config"
+	SCOPE_THROTTLE      = "$throttle"
+	SCOPE_UPLOADER      = "$uploader"
+	SCOPE_RESPONDER     = "$responder"
+	SCOPE_MOCK          = "$mock"
+	SCOPE_ROOT          = "$root"
+	SCOPE_STACK         = "$stack"
+
+	// Artifact names from packs should start with this
+	ARTIFACT_PACK_NAME_PREFIX   = "Packs."
+	ARTIFACT_CUSTOM_NAME_PREFIX = "Custom."
+
+	// USER record encoded in grpc context
+	GRPC_USER_CONTEXT key = iota
 )
+
+type key int
 
 var (
 	HuntIdRegex = regexp.MustCompile(`^H\.[^.]+$`)

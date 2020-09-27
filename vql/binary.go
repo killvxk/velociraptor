@@ -23,7 +23,9 @@ import (
 	"io"
 	"strings"
 
+	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/glob"
+	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 	"www.velocidex.com/golang/vtypes"
 )
@@ -92,7 +94,7 @@ type _BinaryParserPlugin struct{}
 func (self _BinaryParserPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	arg := &_BinaryParserPluginArg{}
@@ -100,6 +102,12 @@ func (self _BinaryParserPlugin) Call(
 	if err != nil {
 		scope.Log("%s: %s", self.Name(), err.Error())
 		close(output_chan)
+		return output_chan
+	}
+
+	err = CheckFilesystemAccess(scope, arg.Accessor)
+	if err != nil {
+		scope.Log("binary_parse: %s", err)
 		return output_chan
 	}
 
@@ -119,7 +127,7 @@ func (self _BinaryParserPlugin) Call(
 
 		var file io.Reader
 		if arg.File != "" {
-			accessor, err := glob.GetAccessor(arg.Accessor, ctx)
+			accessor, err := glob.GetAccessor(arg.Accessor, scope)
 			if err != nil {
 				scope.Log("%s: %v", self.Name(), err)
 				return
@@ -167,14 +175,15 @@ func (self _BinaryParserPlugin) Call(
 			return
 		}
 
-		reader, ok := file.(io.ReaderAt)
+		reader, ok := file.(io.ReadSeeker)
 		if !ok {
 			scope.Log("%s: file is not seekable", self.Name())
 			return
 		}
 
 		target, err := profile.Create(
-			arg.Target, arg.Offset, reader, options)
+			arg.Target, arg.Offset,
+			utils.ReaderAtter{Reader: reader}, options)
 		if err != nil {
 			scope.Log("%s: %s", self.Name(), err.Error())
 			return
@@ -191,7 +200,12 @@ func (self _BinaryParserPlugin) Call(
 					break
 				}
 
-				output_chan <- value
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- value:
+				}
 			}
 		}
 	}()
@@ -223,7 +237,7 @@ type _BinaryParserFunction struct{}
 
 func (self *_BinaryParserFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	result := []vfilter.Row{}
 
 	arg := &_BinaryParserFunctionArg{}

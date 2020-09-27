@@ -40,9 +40,6 @@
 package filesystem
 
 import (
-	"archive/zip"
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -54,8 +51,14 @@ import (
 	"sync"
 	"time"
 
-	"www.velocidex.com/golang/velociraptor/glob"
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/json"
+	"www.velocidex.com/golang/velociraptor/third_party/zip"
+	"www.velocidex.com/golang/velociraptor/utils"
+	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
+
+	"www.velocidex.com/golang/velociraptor/glob"
 )
 
 type ZipFileInfo struct {
@@ -77,7 +80,7 @@ func (self *ZipFileInfo) Size() int64 {
 }
 
 func (self *ZipFileInfo) Data() interface{} {
-	result := vfilter.NewDict()
+	result := ordereddict.NewDict()
 	if self.info != nil {
 		result.Set("CompressedSize", self.info.CompressedSize64)
 		switch self.info.Method {
@@ -120,23 +123,27 @@ func (self *ZipFileInfo) FullPath() string {
 	return self._full_path
 }
 
-func (self *ZipFileInfo) Mtime() glob.TimeVal {
+func (self *ZipFileInfo) SetFullPath(full_path string) {
+	self._full_path = full_path
+}
+
+func (self *ZipFileInfo) Mtime() utils.TimeVal {
 	if self.info != nil {
-		return glob.TimeVal{
+		return utils.TimeVal{
 			Sec: self.info.Modified.Unix(),
 		}
 	}
 
-	return glob.TimeVal{
+	return utils.TimeVal{
 		Sec: 0,
 	}
 }
 
-func (self *ZipFileInfo) Ctime() glob.TimeVal {
+func (self *ZipFileInfo) Ctime() utils.TimeVal {
 	return self.Mtime()
 }
 
-func (self *ZipFileInfo) Atime() glob.TimeVal {
+func (self *ZipFileInfo) Atime() utils.TimeVal {
 	return self.Mtime()
 }
 
@@ -149,56 +156,110 @@ func (self *ZipFileInfo) GetLink() (string, error) {
 	return "", errors.New("Not implemented")
 }
 
-func (self *ZipFileInfo) MarshalJSON() ([]byte, error) {
-	result, err := json.Marshal(&struct {
-		FullPath string
-		Size     int64
-		Mode     os.FileMode
-		ModeStr  string
-		ModTime  time.Time
-		Sys      interface{}
-		Mtime    glob.TimeVal
-		Ctime    glob.TimeVal
-		Atime    glob.TimeVal
-	}{
-		FullPath: self.FullPath(),
-		Size:     self.Size(),
-		Mode:     self.Mode(),
-		ModeStr:  self.Mode().String(),
-		ModTime:  self.ModTime(),
-		Sys:      self.Sys(),
-		Mtime:    self.Mtime(),
-		Ctime:    self.Ctime(),
-		Atime:    self.Atime(),
-	})
-
-	return result, err
-}
-
 type _CDLookup struct {
 	components []string
 	info       *zip.File
 }
 
 type ZipFileCache struct {
+	mu       sync.Mutex
 	zip_file *zip.Reader
 	fd       glob.ReadSeekCloser
-	lookup   []_CDLookup
+
+	// Reference counting
+	refs   int
+	lookup []_CDLookup
+}
+
+func (self *ZipFileCache) GetZipInfo(
+	components []string, full_path string) (*ZipFileInfo, error) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	// This is O(n) but due to the components length check it is
+	// very fast.
+loop:
+	for _, cd_cache := range self.lookup {
+		if len(components) != len(cd_cache.components) {
+			continue
+		}
+
+		for j := range components {
+			if components[j] != cd_cache.components[j] {
+				continue loop
+			}
+		}
+
+		return &ZipFileInfo{
+			info:       cd_cache.info,
+			_name:      components[len(components)-1],
+			_full_path: full_path,
+		}, nil
+	}
+
+	return nil, errors.New("Not found.")
+}
+
+func (self *ZipFileCache) GetChildren(components []string) ([]*ZipFileInfo, error) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	// Determine if we already emitted this file.
+	seen := make(map[string]bool)
+
+	result := []*ZipFileInfo{}
+loop:
+	for _, cd_cache := range self.lookup {
+		for j := range components {
+			if components[j] != cd_cache.components[j] {
+				continue loop
+			}
+		}
+
+		if len(cd_cache.components) > len(components) {
+			// member is either a directory or a file.
+			member_name := cd_cache.components[len(components)]
+
+			member := &ZipFileInfo{
+				_name: member_name,
+			}
+
+			// It is a file if the components are an exact match.
+			if len(cd_cache.components) == len(components)+1 {
+				member.info = cd_cache.info
+			}
+
+			_, pres := seen[member_name]
+			if !pres {
+				result = append(result, member)
+				seen[member_name] = true
+			}
+		}
+	}
+
+	return result, nil
+
+}
+
+func (self *ZipFileCache) Close() {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+
+	self.refs--
+	if self.refs == 0 {
+		self.fd.Close()
+	}
 }
 
 type ZipFileSystemAccessor struct {
 	mu       sync.Mutex
 	fd_cache map[string]*ZipFileCache
+	scope    *vfilter.Scope
 }
 
 func (self *ZipFileSystemAccessor) GetZipFile(
 	file_path string) (*ZipFileCache, *url.URL, error) {
 	url, err := url.Parse(file_path)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	accessor, err := glob.GetAccessor(url.Scheme, context.Background())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -210,7 +271,14 @@ func (self *ZipFileSystemAccessor) GetZipFile(
 	base_url.Fragment = ""
 
 	zip_file_cache, pres := self.fd_cache[base_url.String()]
-	if !pres {
+	if pres {
+		zip_file_cache.refs++
+	} else {
+		accessor, err := glob.GetAccessor(url.Scheme, self.scope)
+		if err != nil {
+			return nil, nil, err
+		}
+
 		fd, err := accessor.Open(url.Path)
 		if err != nil {
 			return nil, nil, err
@@ -234,6 +302,7 @@ func (self *ZipFileSystemAccessor) GetZipFile(
 		zip_file_cache = &ZipFileCache{
 			zip_file: zip_file,
 			fd:       fd,
+			refs:     1,
 		}
 
 		self.fd_cache[url.String()] = zip_file_cache
@@ -288,26 +357,7 @@ func (self *ZipFileSystemAccessor) Lstat(file_path string) (glob.FileInfo, error
 		}
 	}
 
-loop:
-	for _, cd_cache := range root.lookup {
-		if len(components) != len(cd_cache.components) {
-			continue
-		}
-
-		for j := range components {
-			if components[j] != cd_cache.components[j] {
-				continue loop
-			}
-		}
-
-		return &ZipFileInfo{
-			info:       cd_cache.info,
-			_name:      components[len(components)-1],
-			_full_path: url.String(),
-		}, nil
-	}
-
-	return nil, errors.New("Not found.")
+	return root.GetZipInfo(components, url.String())
 }
 
 func (self *ZipFileSystemAccessor) Open(path string) (glob.ReadSeekCloser, error) {
@@ -323,7 +373,7 @@ func (self *ZipFileSystemAccessor) Open(path string) (glob.ReadSeekCloser, error
 		return nil, err
 	}
 
-	return &SeekableZip{fd, info}, nil
+	return &SeekableZip{ReadCloser: fd, info: info}, nil
 }
 
 var ZipFileSystemAccessor_re = regexp.MustCompile("/")
@@ -363,83 +413,71 @@ func (self *ZipFileSystemAccessor) ReadDir(file_path string) ([]glob.FileInfo, e
 		}
 	}
 
-	result := []glob.FileInfo{}
-
-	// Determine if we already emitted this file. O(n) but if n is
-	// small it should be faster than map.
-	name_in_result := func(name string) bool {
-		for _, item := range result {
-			if item.Name() == name {
-				return true
-			}
-		}
-		return false
+	children, err := root.GetChildren(components)
+	if err != nil {
+		return nil, err
 	}
 
-loop:
-	for _, cd_cache := range root.lookup {
-		for j := range components {
-			if components[j] != cd_cache.components[j] {
-				continue loop
-			}
-		}
-
-		if len(cd_cache.components) > len(components) {
-			// member is either a directory or a file.
-			member_name := cd_cache.components[len(components)]
-
-			url.Fragment = path.Join(
-				cd_cache.components[:len(components)+1]...)
-
-			member := &ZipFileInfo{
-				_name:      member_name,
-				_full_path: url.String(),
-			}
-
-			// It is a file if the components are an exact match.
-			if len(cd_cache.components) == len(components)+1 {
-				member.info = cd_cache.info
-			}
-
-			if !name_in_result(member_name) {
-				result = append(result, member)
-			}
-		}
+	result := []glob.FileInfo{}
+	for _, item := range children {
+		// Make a copy
+		child_url := *url
+		child_url.Fragment = path.Join(child_url.Fragment, item.Name())
+		item.SetFullPath(child_url.String())
+		result = append(result, item)
 	}
 
 	return result, nil
 }
 
-func (self ZipFileSystemAccessor) New(ctx context.Context) glob.FileSystemAccessor {
-	result := &ZipFileSystemAccessor{
-		fd_cache: make(map[string]*ZipFileCache),
+const (
+	ZipFileSystemAccessorTag = "_ZipFS"
+)
+
+func (self *ZipFileSystemAccessor) New(scope *vfilter.Scope) (glob.FileSystemAccessor, error) {
+	result_any := vql_subsystem.CacheGet(scope, ZipFileSystemAccessorTag)
+	if result_any == nil {
+		// Create a new cache in the scope.
+		result := &ZipFileSystemAccessor{
+			fd_cache: make(map[string]*ZipFileCache),
+			scope:    scope,
+		}
+
+		vql_subsystem.CacheSet(scope, ZipFileSystemAccessorTag, result)
+
+		// When scope is destroyed, we close all the filehandles.
+		scope.AddDestructor(func() {
+			// Decrement refs until we are allowed to
+			// close the file.
+			for _, v := range result.fd_cache {
+				v.refs--
+				if v.refs == 0 {
+					v.fd.Close()
+				}
+			}
+		})
+		return result, nil
 	}
 
-	// When the context is done, close all the files.
-	go func() {
-		<-ctx.Done()
-
-		result.mu.Lock()
-		defer result.mu.Unlock()
-
-		for _, v := range result.fd_cache {
-			v.fd.Close()
-		}
-		result.fd_cache = make(map[string]*ZipFileCache)
-	}()
-
-	return result
+	return result_any.(glob.FileSystemAccessor), nil
 }
 
 type SeekableZip struct {
 	io.ReadCloser
-	info *ZipFileInfo
+	info   *ZipFileInfo
+	offset int64
+}
+
+func (self *SeekableZip) Read(buff []byte) (int, error) {
+	n, err := self.ReadCloser.Read(buff)
+	self.offset += int64(n)
+	return n, err
 }
 
 func (self *SeekableZip) Seek(offset int64, whence int) (int64, error) {
 	switch whence {
 	case io.SeekStart:
-		if offset == 0 {
+		if offset == 0 && self.offset == 0 {
 			return 0, nil
 		}
 
@@ -455,4 +493,6 @@ func (self *SeekableZip) Stat() (os.FileInfo, error) {
 
 func init() {
 	glob.Register("zip", &ZipFileSystemAccessor{})
+
+	json.RegisterCustomEncoder(&ZipFileInfo{}, glob.MarshalGlobFileInfo)
 }

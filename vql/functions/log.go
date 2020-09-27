@@ -20,6 +20,7 @@ package functions
 import (
 	"context"
 
+	"github.com/Velocidex/ordereddict"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -28,15 +29,11 @@ type LogFunctionArgs struct {
 	Message string `vfilter:"required,field=message,doc=Message to log."`
 }
 
-var (
-	last_log string
-)
-
 type LogFunction struct{}
 
 func (self *LogFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &LogFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -44,10 +41,13 @@ func (self *LogFunction) Call(ctx context.Context,
 		return false
 	}
 
-	if arg.Message != last_log {
-		scope.Log("%v", arg.Message)
-		last_log = arg.Message
+	last_log, ok := scope.GetContext("last_log").(string)
+	if ok && arg.Message == last_log {
+		return true
 	}
+
+	scope.Log("%v", arg.Message)
+	scope.SetContext("last_log", arg.Message)
 
 	return true
 }

@@ -19,6 +19,9 @@ package networking
 
 import (
 	"net"
+
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/acls"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -29,8 +32,15 @@ func init() {
 			PluginName: "interfaces",
 			Function: func(
 				scope *vfilter.Scope,
-				args *vfilter.Dict) []vfilter.Row {
+				args *ordereddict.Dict) []vfilter.Row {
 				var result []vfilter.Row
+
+				err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
+				if err != nil {
+					scope.Log("interfaces: %s", err)
+					return result
+				}
+
 				if interfaces, err := net.Interfaces(); err == nil {
 					for _, item := range interfaces {
 						local_item := item
@@ -40,7 +50,6 @@ func init() {
 
 				return result
 			},
-			RowType: net.Interface{},
-			Doc:     "List all active interfaces.",
+			Doc: "List all active interfaces.",
 		})
 }

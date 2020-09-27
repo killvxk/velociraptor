@@ -1,0 +1,359 @@
+name: Server.Utils.CreateCollector
+description: |
+  A utility artifact to create a stand alone collector.
+
+  This artifact is actually invoked by the Offline collector GUI and
+  that is the recommended way to launch it. You can find the Offline
+  collector builder in the `Server Artifacts` section of the GUI.
+
+type: SERVER
+
+tools:
+  - name: VelociraptorWindows
+    github_project: Velocidex/velociraptor
+    github_asset_regex: windows-amd64.exe
+    serve_locally: true
+
+  - name: VelociraptorWindows_x86
+    github_project: Velocidex/velociraptor
+    github_asset_regex: windows-386.exe
+    serve_locally: true
+
+  - name: VelociraptorLinux
+    github_project: Velocidex/velociraptor
+    github_asset_regex: linux-amd64
+    serve_locally: true
+
+  - name: VelociraptorDarwin
+    github_project: Velocidex/velociraptor
+    github_asset_regex: darwin-amd64
+    serve_locally: true
+
+parameters:
+  - name: OS
+    default: Windows
+    type: choices
+    choices:
+      - Windows
+      - Linux
+      - MacOS
+
+  - name: artifacts
+    description: A list of artifacts to collect
+    type: json_array
+    default: |
+      ["Generic.Client.Info"]
+
+  - name: template
+    default: Reporting.Default
+    description: The HTML report template to use.
+
+  - name: Password
+    description: If set we encrypt collected zip files with this password.
+
+  - name: parameters
+    description: A dict containing the parameters to set.
+    type: json
+    default: |
+      {}
+
+  - name: target
+    description: Output type
+    type: choices
+    default: ZIP
+    choices:
+      - ZIP
+      - GCS
+      - S3
+
+  - name: target_args
+    description: Type Dependent args
+    type: json
+    default: "{}"
+
+  - name: opt_verbose
+    default: Y
+    type: bool
+    description: Show verbose progress.
+
+  - name: opt_banner
+    default: Y
+    type: bool
+    description: Show Velociraptor banner.
+
+  - name: opt_prompt
+    default: Y
+    type: bool
+    description: Wait for a prompt before closing.
+
+  - name: opt_admin
+    default: Y
+    type: bool
+    description: Require administrator privilege when running.
+
+  - name: StandardCollection
+    type: hidden
+    default: |
+      // Add all the tools we are going to use to the inventory.
+      LET _ <= SELECT inventory_add(tool=ToolName, hash=ExpectedHash)
+      FROM parse_csv(filename="/inventory.csv", accessor="me")
+      WHERE log(message="Adding tool " + ToolName)
+
+      LET Artifacts <= parse_json_array(data=Artifacts)
+      LET Parameters <= parse_json(data=Parameters)
+      LET baseline <= SELECT Fqdn FROM info()
+
+      // Make the filename safe on windows.
+      LET filename <= regex_replace(
+          source=format(format="Collection-%s-%s",
+                        args=[baseline[0].Fqdn, timestamp(epoch=now())]),
+          re="[^0-9A-Za-z\\-.]", replace="_")
+
+      LET _ <= log(message="Will collect package " + filename)
+
+      SELECT * FROM collect(artifacts=Artifacts, report=filename + ".html",
+          args=Parameters, output=filename + ".zip", template=Template,
+          password=Password)
+
+  - name: S3Collection
+    type: hidden
+    default: |
+      // Add all the tools we are going to use to the inventory.
+      LET _ <= SELECT inventory_add(tool=ToolName, hash=ExpectedHash)
+      FROM parse_csv(filename="/inventory.csv", accessor="me")
+      WHERE log(message="Adding tool " + ToolName)
+
+      LET Artifacts <= parse_json_array(data=Artifacts)
+      LET Parameters <= parse_json(data=Parameters)
+      LET baseline <= SELECT Fqdn FROM info()
+      LET TargetArgs <= parse_json(data=target_args)
+
+      // Make the filename safe on windows.
+      LET filename <= regex_replace(
+          source=format(format="Collection-%s-%s",
+                        args=[baseline[0].Fqdn, timestamp(epoch=now())]),
+          re="[^0-9A-Za-z\\-.]", replace="_")
+
+      LET _ <= log(message="Will collect package " + filename +
+         " and upload to s3 bucket " + TargetArgs.bucket)
+
+      SELECT upload_s3(file=Container,
+          bucket=TargetArgs.bucket,
+          name=filename + ".zip",
+          credentialskey=TargetArgs.credentialsKey,
+          credentialssecret=TargetArgs.credentialsSecret,
+          region=TargetArgs.region) AS Upload,
+       upload_s3(file=Report,
+          bucket=TargetArgs.bucket,
+          name=filename + ".html",
+          credentialskey=TargetArgs.credentialsKey,
+          credentialssecret=TargetArgs.credentialsSecret,
+          region=TargetArgs.region) AS ReportUpload
+      FROM collect(artifacts=Artifacts, report=tempfile(extension=".html"),
+          args=Parameters, output=tempfile(extension=".zip"), template=Template,
+          password=Password)
+
+  - name: GCSCollection
+    type: hidden
+    default: |
+      // Add all the tools we are going to use to the inventory.
+      LET _ <= SELECT inventory_add(tool=ToolName, hash=ExpectedHash)
+      FROM parse_csv(filename="/inventory.csv", accessor="me")
+      WHERE log(message="Adding tool " + ToolName)
+
+      LET Artifacts <= parse_json_array(data=Artifacts)
+      LET Parameters <= parse_json(data=Parameters)
+      LET baseline <= SELECT Fqdn FROM info()
+      LET TargetArgs <= parse_json(data=target_args)
+      LET GCSBlob <= parse_json(data=TargetArgs.GCSKey)
+
+      // Make the filename safe on windows.
+      LET filename <= regex_replace(
+          source=format(format="Collection-%s-%s",
+                        args=[baseline[0].Fqdn, timestamp(epoch=now())]),
+          re="[^0-9A-Za-z\\-.]", replace="_")
+
+      LET _ <= log(message="Will collect package " + filename +
+         " and upload to GCS bucket " + TargetArgs.bucket)
+
+      SELECT upload_gcs(file=Container,
+          bucket=TargetArgs.bucket,
+          project=GCSBlob.project_id,
+          name=filename + ".zip",
+          credentials=TargetArgs.GCSKey
+      ) AS Upload,
+      upload_gcs(file=Report,
+          bucket=TargetArgs.bucket,
+          project=GCSBlob.project_id,
+          name=filename + ".html",
+          credentials=TargetArgs.GCSKey
+      ) AS ReportUpload
+      FROM collect(artifacts=Artifacts, report=tempfile(extension=".html"),
+          args=Parameters, output=tempfile(extension=".zip"), template=Template,
+          password=Password)
+
+  - name: PackageToolsArtifact
+    description: Collects and uploads third party binaries.
+    type: hidden
+    default: |
+      name: PackageToolsArtifact
+      parameters:
+       - name: Binaries
+      sources:
+       - query: |
+          LET temp <= tempfile()
+
+          LET uploader = SELECT ToolName,
+                                Upload.Path AS Filename,
+                                Upload.sha256 AS ExpectedHash,
+                                Upload.Size AS Size
+          FROM foreach(row=Binaries,
+            query={
+              SELECT _value AS ToolName, upload(file=FullPath, name=Name) AS Upload
+              FROM Artifact.Generic.Utils.FetchBinary(
+                   ToolName=_value, SleepDuration='0',
+                   ToolInfo=inventory_get(tool=_value))
+            })
+
+          // Flush the entire query into the inventory file.
+          LET _ <= SELECT * FROM write_csv(filename=temp, query=uploader)
+
+          // Now upload it.
+          SELECT upload(file=temp, name="inventory.csv") FROM scope()
+
+  - name: FetchBinaryOverride
+    description: |
+       A replacement for Generic.Utils.FetchBinary which
+       grabs files from the local archive.
+
+    default: |
+       LET temp_binary <= tempfile(extension=".exe",
+                remove_last=TRUE, permissions="x")
+
+       LET matching_tools = SELECT ToolName AS ArchiveTool, Filename
+       FROM parse_csv(filename="/inventory.csv", accessor="me")
+
+       SELECT * FROM foreach(row=matching_tools, query={
+         SELECT copy(filename=Filename, accessor="me", dest=temp_binary) AS FullPath,
+                     Filename AS Name
+         FROM scope()
+         WHERE ToolName = ArchiveTool
+       })
+
+sources:
+  - query: |
+      LET Payload <= tempfile(extension=".zip")
+      LET Artifacts <= parse_json_array(data=artifacts)
+      LET Binaries <= SELECT * FROM foreach(
+          row={
+             SELECT tools FROM artifact_definitions(names=Artifacts)
+          }, query={
+             SELECT * FROM foreach(row=tools,
+             query={
+              SELECT name AS Binary FROM scope()
+             })
+          }) GROUP BY Binary
+
+      // Get some tempfiles to work with.
+      LET Config <= tempfile()
+      LET Destination <= tempfile()
+
+      // Choose the right target binary depending on the target OS
+      LET tool_name = SELECT * FROM switch(
+       a={ SELECT "VelociraptorWindows" AS Type FROM scope() WHERE OS = "Windows"},
+       b={ SELECT "VelociraptorWindows_x86" AS Type FROM scope() WHERE OS = "Windows_x86"},
+       c={ SELECT "VelociraptorLinux" AS Type FROM scope() WHERE OS = "Linux"},
+       d={ SELECT "VelociraptorDarwin" AS Type FROM scope() WHERE OS = "MacOS"},
+       e={ SELECT "" AS Type FROM scope()
+           WHERE NOT log(message="Unknown target type " + OS) }
+      )
+
+      // Repack this binary.
+      LET target_binary <= SELECT FullPath, Name
+         FROM Artifact.Generic.Utils.FetchBinary(
+            ToolName=tool_name[0].Type, SleepDuration="0",
+            ToolInfo=inventory_get(tool=tool_name[0].Type))
+         WHERE log(message="Target binary " + Name + " is at " + FullPath)
+
+      // This is what we will call it.
+      LET CollectorName <= format(
+          format='Collector_%v',
+          args=[target_binary[0].Name, ])
+
+      // Create a zip file with the binaries in it.
+      LET _ <= SELECT * FROM collect(artifacts="PackageToolsArtifact",
+         output=Payload, args=dict(Binaries=Binaries.Binary),
+         artifact_definitions=PackageToolsArtifact)
+
+      LET CollectionArtifact <= SELECT Value FROM switch(
+        a = { SELECT StandardCollection AS Value FROM scope() WHERE target = "ZIP" },
+        b = { SELECT S3Collection AS Value  FROM scope() WHERE target = "S3" },
+        c = { SELECT GCSCollection AS Value  FROM scope() WHERE target = "GCS" },
+        d = { SELECT "" AS Value  FROM scope() WHERE log(message="Unknown collection type " + target) }
+      )
+
+      LET definitions <= SELECT * FROM chain(
+      a = { SELECT name, description, tools, parameters, sources, reports
+            FROM artifact_definitions(names=Artifacts + template)
+            WHERE name =~ "^(Custom|Packs)\\." AND
+              log(message="Adding artifact_definition for " + name) },
+
+      b = { SELECT "Collector" AS name, (
+                    dict(name="Artifacts", default=artifacts),
+                    dict(name="Parameters", default=parameters),
+                    dict(name="Template", default=template),
+                    dict(name="Password", default=Password),
+                    dict(name="target_args", default=target_args),
+                ) AS parameters,
+                (
+                  dict(query=CollectionArtifact[0].Value),
+                ) AS sources
+            FROM scope() },
+      c = { SELECT "Generic.Utils.FetchBinary" AS name,
+            (
+               dict(name="SleepDuration"),
+               dict(name="ToolName"),
+               dict(name="ToolInfo"),
+            ) AS parameters,
+            (
+               dict(query=FetchBinaryOverride),
+            ) AS sources FROM scope()  }
+      )
+
+      LET optional_cmdline = SELECT * FROM chain(
+        a={ SELECT "-v" AS Opt FROM scope() WHERE opt_verbose = "Y"},
+        b={ SELECT "--nobanner" AS Opt FROM scope() WHERE opt_banner != "Y"},
+        c={ SELECT "--require_admin" AS Opt FROM scope() WHERE opt_admin = "Y"},
+        d={ SELECT "--prompt" AS Opt FROM scope() WHERE opt_prompt = "Y"}
+      )
+
+      // Build the autoexec config file depending on the user's
+      // collection type choices.
+      LET autoexec <= dict(autoexec=dict(
+          argv=("artifacts", "collect", "Collector",
+                "--logfile", CollectorName + ".log") + optional_cmdline.Opt,
+          artifact_definitions=definitions)
+      )
+
+      LET me <= SELECT Exe FROM info()
+
+      // Copy the configuration to a temp file and shell out to our
+      // binary to repack it.
+      LET repack_step = SELECT upload(
+           file=Destination,
+           accessor="file",
+           name=CollectorName) AS Binary,
+           timestamp(epoch=now()) As CreationTime
+      FROM execve(argv=[
+        me[0].Exe, "config", "repack",
+        "--exe", target_binary[0].FullPath,
+        "--append", Payload,
+        copy(dest=Config,
+             accessor='data',
+             filename=serialize(format='json', item=autoexec)),
+        Destination ], length=1000000)
+      WHERE log(message="Creating config on " + Config) AND log(message=Stderr)
+
+      // Only actually run stuff if everything looks right.
+      SELECT * FROM if(condition=autoexec AND target_binary AND me[0].Exe,
+         then=repack_step)

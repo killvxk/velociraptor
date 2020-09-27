@@ -23,7 +23,7 @@ exports.DownloadDirective = function() {
       value: '=',
     },
     restrict: 'E',
-    templateUrl: '/static/angular-components/client/virtual-file-system/download.html',
+    templateUrl: window.base_path+'/static/angular-components/client/virtual-file-system/download.html',
     controller: DownloadController,
     controllerAs: 'controller'
   };
@@ -37,11 +37,3 @@ exports.DownloadDirective = function() {
  * @export
  */
 exports.DownloadDirective.directive_name = 'grrVfsDownload';
-
-/**
- * Semantic type corresponding to this directive.
- *
- * @const
- * @export
- */
-exports.DownloadDirective.semantic_type = 'Download';

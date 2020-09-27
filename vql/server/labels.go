@@ -22,9 +22,10 @@ package server
 import (
 	"context"
 
-	"www.velocidex.com/golang/velociraptor/api"
-	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
-	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/artifacts"
+	"www.velocidex.com/golang/velociraptor/services"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -32,14 +33,15 @@ import (
 type AddLabelsArgs struct {
 	ClientId string   `vfilter:"required,field=client_id,doc=Client ID to label."`
 	Labels   []string `vfilter:"required,field=labels,doc=A list of labels to apply"`
-	Op       string   `vfilter:"optional,field=op,doc=An operation on the labels (add, remove)"`
+	Op       string   `vfilter:"optional,field=op,doc=An operation on the labels (set, check, remove)"`
 }
 
 type AddLabels struct{}
 
 func (self *AddLabels) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
+
 	arg := &AddLabelsArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -47,25 +49,37 @@ func (self *AddLabels) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	any_config_obj, _ := scope.Resolve("server_config")
-	config_obj, ok := any_config_obj.(*config_proto.Config)
+	err = vql_subsystem.CheckAccess(scope, acls.LABEL_CLIENT)
+	if err != nil {
+		scope.Log("label: %s", err)
+		return vfilter.Null{}
+	}
+
+	config_obj, ok := artifacts.GetServerConfig(scope)
 	if !ok {
 		scope.Log("Command can only run on the server")
 		return vfilter.Null{}
 	}
 
-	request := &api_proto.LabelClientsRequest{
-		Labels:    arg.Labels,
-		ClientIds: []string{arg.ClientId},
-		Operation: arg.Op,
-	}
+	labeler := services.GetLabeler()
+	for _, label := range arg.Labels {
+		switch arg.Op {
+		case "set":
+			err = labeler.SetClientLabel(config_obj, arg.ClientId, label)
 
-	_, err = api.LabelClients(config_obj, request)
-	if err != nil {
-		scope.Log("label: %s", err.Error())
-		return vfilter.Null{}
-	}
+		case "remove":
+			err = labeler.RemoveClientLabel(config_obj, arg.ClientId, label)
 
+		case "check":
+			if !labeler.IsLabelSet(config_obj, arg.ClientId, label) {
+				return false
+			}
+		}
+		if err != nil {
+			scope.Log("label: %s", err.Error())
+			return vfilter.Null{}
+		}
+	}
 	return arg
 }
 

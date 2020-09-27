@@ -1,27 +1,38 @@
 package api
 
 import (
-	"encoding/json"
+	"fmt"
 	"strings"
 
 	errors "github.com/pkg/errors"
 	context "golang.org/x/net/context"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/constants"
+	"www.velocidex.com/golang/velociraptor/json"
 	"www.velocidex.com/golang/velociraptor/reporting"
+	"www.velocidex.com/golang/velociraptor/services"
+	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 )
 
 func getReport(ctx context.Context,
-	config_obj *config_proto.Config, in *api_proto.GetReportRequest) (
+	config_obj *config_proto.Config,
+	acl_manager vql_subsystem.ACLManager,
+	repository services.Repository,
+	in *api_proto.GetReportRequest) (
 	*api_proto.GetReportResponse, error) {
 
 	template_engine, err := reporting.NewGuiTemplateEngine(
-		config_obj, ctx, in.Artifact)
+		config_obj, ctx, nil, /* default scope */
+		acl_manager, repository, nil, in.Artifact)
 	if err != nil {
-		if strings.HasPrefix(in.Artifact, "Custom.") {
+		if strings.HasPrefix(in.Artifact,
+			constants.ARTIFACT_CUSTOM_NAME_PREFIX) {
 			template_engine, err = reporting.NewGuiTemplateEngine(
-				config_obj, ctx,
-				strings.TrimPrefix(in.Artifact, "Custom."))
+				config_obj, ctx, nil, /* default scope */
+				acl_manager, repository, nil,
+				strings.TrimPrefix(in.Artifact,
+					constants.ARTIFACT_CUSTOM_NAME_PREFIX))
 		}
 		if err != nil {
 			return nil, err
@@ -31,9 +42,22 @@ func getReport(ctx context.Context,
 
 	var template_data string
 
+	if in.Type == "" {
+		definition, pres := repository.Get(config_obj, "Custom."+in.Artifact)
+		if !pres {
+			definition, pres = repository.Get(config_obj, in.Artifact)
+		}
+		if pres {
+			for _, report := range definition.Reports {
+				in.Type = strings.ToUpper(report.Type)
+			}
+		}
+	}
+
 	switch in.Type {
 	default:
-		return nil, errors.New("Report type not supported")
+		return nil, errors.New(fmt.Sprintf(
+			"Report type %v not supported", in.Type))
 
 	// A CLIENT artifact report is a specific artifact
 	// collected from a client.
@@ -78,7 +102,7 @@ func getReport(ctx context.Context,
 
 	return &api_proto.GetReportResponse{
 		Data:     string(encoded_data),
-		Messages: *template_engine.Messages,
+		Messages: template_engine.Messages(),
 		Template: template_data,
 	}, nil
 

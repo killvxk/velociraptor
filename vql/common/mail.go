@@ -21,8 +21,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/Velocidex/ordereddict"
 	gomail "gopkg.in/gomail.v2"
-	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/artifacts"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
@@ -47,21 +49,26 @@ type MailPlugin struct{}
 func (self MailPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
 		defer close(output_chan)
 
-		any_config_obj, _ := scope.Resolve("server_config")
-		config_obj, ok := any_config_obj.(*config_proto.Config)
+		err := vql_subsystem.CheckAccess(scope, acls.SERVER_ADMIN)
+		if err != nil {
+			scope.Log("mail: %s", err)
+			return
+		}
+
+		config_obj, ok := artifacts.GetServerConfig(scope)
 		if !ok {
 			scope.Log("Command can only run on the server")
 			return
 		}
 
 		arg := &MailPluginArgs{}
-		err := vfilter.ExtractArgs(scope, args, arg)
+		err = vfilter.ExtractArgs(scope, args, arg)
 		if err != nil {
 			scope.Log("mail: %v", err)
 			return
@@ -74,6 +81,11 @@ func (self MailPlugin) Call(
 
 		if len(arg.To) == 0 {
 			scope.Log("mail: no recipient.")
+			return
+		}
+
+		if config_obj.Mail == nil {
+			scope.Log("mail: not configured")
 			return
 		}
 
@@ -96,7 +108,7 @@ func (self MailPlugin) Call(
 			port = 587
 		}
 
-		d := gomail.NewPlainDialer(
+		d := gomail.NewDialer(
 			config_obj.Mail.Server,
 			int(port),
 			config_obj.Mail.AuthUsername,
@@ -111,7 +123,12 @@ func (self MailPlugin) Call(
 			// artifact CSV file.
 		}
 
-		output_chan <- arg
+		select {
+		case <-ctx.Done():
+			return
+
+		case output_chan <- arg:
+		}
 	}()
 
 	return output_chan

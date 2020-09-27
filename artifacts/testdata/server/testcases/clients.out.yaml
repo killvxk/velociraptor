@@ -1,86 +1,57 @@
-SELECT OsInfo.fqdn as Hostname, ClientId, LastSeenAt / 1000000  as LastSeen FROM clients() order by Hostname[
+LET _ <= SELECT label(client_id=client_id, op='remove', labels=labels), client_id FROM clients(search='label:*') ORDER BY client_id[]SELECT os_info.fqdn as Hostname, client_id, last_seen_at / 1000000  as LastSeen FROM clients() order by Hostname[
  {
-  "ClientId": "C.c916a7e445eb0868",
-  "Hostname": "DESKTOP-IOME2K5",
-  "LastSeen": 1541049785.896051
- },
- {
-  "ClientId": "C.11a3013cca8f826e",
-  "Hostname": "TestComputer",
-  "LastSeen": 1542151833.433916
- },
- {
-  "ClientId": "C.952156a4b022ddee",
-  "Hostname": "trek",
-  "LastSeen": 1540368672.777812
+  "Hostname": "DESKTOP-BP4S7TF",
+  "client_id": "C.4f5e52adf0a337a9",
+  "LastSeen": 1573215522.537748
  }
-]SELECT OsInfo.fqdn as Hostname, OsInfo.system as System, ClientId FROM clients(search='host:testcomputer') order by client_id[
+]SELECT os_info.fqdn as Hostname, os_info.system as System, client_id FROM clients(search='host:testcomputer') order by client_id[]SELECT * from clients() order by client_id[
  {
-  "ClientId": "C.11a3013cca8f826e",
-  "Hostname": "TestComputer",
-  "System": "windows"
- }
-]SELECT * from clients() order by client_id[
- {
-  "client_id": "C.11a3013cca8f826e",
-  "agent_information": {},
+  "client_id": "C.4f5e52adf0a337a9",
+  "agent_information": {
+   "version": "2019-11-07T22:08:33+10:00",
+   "name": "velociraptor",
+   "build_time": ""
+  },
   "os_info": {
    "system": "windows",
-   "release": "Microsoft Windows 10 Pro N10.0.15063 Build 15063",
+   "node": "",
+   "release": "Microsoft Windows 10 Enterprise Evaluation10.0.18362 Build 18362",
+   "version": "",
    "machine": "amd64",
-   "fqdn": "TestComputer"
+   "kernel": "",
+   "fqdn": "DESKTOP-BP4S7TF",
+   "install_date": 0,
+   "libc_ver": "",
+   "architecture": ""
   },
-  "last_seen_at": 1542151833433916,
-  "last_ip": "192.168.0.11:51087",
-  "last_ip_class": 1
- },
- {
-  "client_id": "C.952156a4b022ddee",
-  "agent_information": {},
-  "os_info": {
-   "system": "linux",
-   "release": "ubuntu18.10",
-   "machine": "amd64",
-   "fqdn": "trek"
-  },
-  "last_seen_at": 1540368672777812,
-  "last_ip": "192.168.0.5:33510",
-  "last_ip_class": 1
- },
- {
-  "client_id": "C.c916a7e445eb0868",
-  "agent_information": {},
-  "os_info": {
-   "system": "windows",
-   "release": "Microsoft Windows 10 Pro N10.0.17134 Build 17134",
-   "machine": "amd64",
-   "fqdn": "DESKTOP-IOME2K5"
-  },
-  "last_seen_at": 1541049785896051,
-  "last_ip": "192.168.0.18:49749",
-  "last_ip_class": 1
+  "first_seen_at": 0,
+  "last_seen_at": 1573215522537748,
+  "last_booted_at": 0,
+  "last_clock": 0,
+  "last_crash_at": 0,
+  "last_ip": "192.168.0.5:40933",
+  "last_interrogate_flow_id": "F.BN21C82J8DM8K",
+  "last_ip_class": "INTERNAL",
+  "labels": []
  }
-]SELECT client_id, context.create_time as CreateTime,
-       runner_args.args.artifacts.names as Artifacts,
-       runner_args.flow_name as Flow
-FROM flows(client_id='C.11a3013cca8f826e')
-WHERE Flow = 'ArtifactCollector' order by client_id
-[
+]SELECT client_id, timestamp(epoch=create_time/1000000) as CreateTime, request.artifacts as Artifacts, session_id as Flow FROM flows(client_id='C.4f5e52adf0a337a9') WHERE Artifacts =~ "Netstat"[
  {
+  "client_id": "C.56a8dfd31eb1fa6f",
+  "CreateTime": "2020-08-03T01:24:30.468293905Z",
   "Artifacts": [
-   "Windows.Applications.ChocolateyPackages"
+   "Windows.Network.NetstatEnriched"
   ],
-  "CreateTime": 1544876976531608,
-  "Flow": "ArtifactCollector",
-  "client_id": "C.11a3013cca8f826e"
- },
+  "Flow": "F.BSJMEJIPT6P9I"
+ }
+]SELECT client_set_metadata(client_id='C.4f5e52adf0a337a9', Foo='Bar', Bar='Baz', Invalid=5) FROM scope()[
  {
-  "Artifacts": [
-   "Windows.Applications.ChocolateyPackages",
-   "Windows.Applications.Chrome.Extensions"
-  ],
-  "CreateTime": 1541550146808437,
-  "Flow": "ArtifactCollector",
-  "client_id": "C.11a3013cca8f826e"
+  "client_set_metadata(client_id='C.4f5e52adf0a337a9', Foo='Bar', Bar='Baz', Invalid=5)": true
+ }
+]SELECT client_metadata(client_id='C.4f5e52adf0a337a9') FROM scope()[
+ {
+  "client_metadata(client_id='C.4f5e52adf0a337a9')": {
+   "Foo": "Bar",
+   "Bar": "Baz"
+  }
  }
 ]

@@ -27,8 +27,12 @@ const FlowLogController = function($scope) {
  * @private
  */
 FlowLogController.prototype.onChange_ = function() {
-  this.queryParams.path = '/flows/' + this.scope_['flowId'] + '/logs';;
-  this.queryParams.client_id = this.scope_["clientId"];
+    this.queryParams = {
+        client_id: this.scope_["clientId"],
+        flow_id: this.scope_['flowId'],
+        type: 'log',
+        path: this.scope_['flowId'],
+    };
 };
 
 /**
@@ -45,7 +49,7 @@ exports.FlowLogDirective = function() {
           clientId: '=',
       },
       restrict: 'E',
-      templateUrl: '/static/angular-components/flow/flow-log.html',
+      templateUrl: window.base_path+'/static/angular-components/flow/flow-log.html',
       controller: FlowLogController,
       controllerAs: 'controller'
   };

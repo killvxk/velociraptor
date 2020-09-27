@@ -21,13 +21,16 @@ import (
 	"context"
 	"time"
 
+	"github.com/Velocidex/ordereddict"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
+	"www.velocidex.com/golang/velociraptor/vql/functions"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
 
 type ClockPluginArgs struct {
-	Period   int64 `vfilter:"optional,field=period,doc=Wait this many seconds between events."`
-	PeriodMs int64 `vfilter:"optional,field=ms,doc=Wait this many ms between events."`
+	StartTime vfilter.Any `vfilter:"optional,field=start,doc=Start at this time."`
+	Period    int64       `vfilter:"optional,field=period,doc=Wait this many seconds between events."`
+	PeriodMs  int64       `vfilter:"optional,field=ms,doc=Wait this many ms between events."`
 }
 
 type ClockPlugin struct{}
@@ -35,7 +38,7 @@ type ClockPlugin struct{}
 func (self ClockPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
@@ -52,15 +55,33 @@ func (self ClockPlugin) Call(
 			arg.Period = 1
 		}
 
+		duration := time.Duration(arg.Period)*time.Second +
+			time.Duration(arg.PeriodMs)*time.Second/1000
+
+		if arg.StartTime != nil {
+			start, err := functions.TimeFromAny(scope, arg.StartTime)
+			if err != nil {
+				scope.Log("clock: %v", err)
+				return
+			}
+
+			// Wait for start condition.
+			select {
+			case <-ctx.Done():
+				return
+
+			case <-time.After(time.Until(start)):
+				output_chan <- time.Now()
+			}
+		}
+
+		// Now just fire off as normal.
 		for {
 			select {
 			case <-ctx.Done():
 				return
 
-			case <-time.After(
-				time.Duration(arg.Period)*time.Second +
-					time.Duration(arg.PeriodMs)*
-						time.Second/1000):
+			case <-time.After(duration):
 				output_chan <- time.Now()
 			}
 		}

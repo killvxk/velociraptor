@@ -25,9 +25,12 @@ import (
 	_ "www.velocidex.com/golang/velociraptor/vql/common"
 	_ "www.velocidex.com/golang/velociraptor/vql/filesystem"
 	_ "www.velocidex.com/golang/velociraptor/vql/functions"
+	_ "www.velocidex.com/golang/velociraptor/vql/golang"
 	_ "www.velocidex.com/golang/velociraptor/vql/networking"
 	_ "www.velocidex.com/golang/velociraptor/vql/parsers"
 	_ "www.velocidex.com/golang/velociraptor/vql/parsers/csv"
+	_ "www.velocidex.com/golang/velociraptor/vql/parsers/ese"
 	_ "www.velocidex.com/golang/velociraptor/vql/parsers/event_logs"
+	_ "www.velocidex.com/golang/velociraptor/vql/parsers/syslog"
 	_ "www.velocidex.com/golang/velociraptor/vql/tools"
 )

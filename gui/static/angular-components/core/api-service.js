@@ -4,7 +4,6 @@ goog.module('grrUi.core.apiService');
 goog.module.declareLegacyNamespace();
 
 
-
 var UNAUTHORIZED_API_RESPONSE_EVENT = 'UnauthorizedApiResponse';
 
 /**
@@ -23,70 +22,13 @@ exports.UNAUTHORIZED_API_RESPONSE_EVENT = UNAUTHORIZED_API_RESPONSE_EVENT;
  * @return {string} Encoded url path.
  */
 exports.encodeUrlPath = function(urlPath) {
-  var components = urlPath.split('/');
-  var encodedComponents = components.map(encodeURIComponent);
-  return encodedComponents.join('/');
+    var base_path = window.base_path;
+    var components = urlPath.split('/');
+    var encodedComponents = components.map(encodeURIComponent);
+    return encodedComponents.join('/');
 };
+
 var encodeUrlPath = exports.encodeUrlPath;
-
-/**
- * Strips type information from a JSON-encoded RDFValue.
- * This may be useful when sending values edited with forms back to the
- * server. Values edited by semantic forms will have rich type information
- * in them, while server will be expecting stripped down version of the
- * same data.
- *
- * For example, this is the value that may be produced by the form:
- * {
- *     "age": 0,
- *     "mro": [
- *       "AFF4ObjectLabel",
- *       "RDFProtoStruct",
- *       "RDFStruct",
- *       "RDFValue",
- *       "object"
- *     ],
- *     "type": "AFF4ObjectLabel",
- *     "value": {
- *       "name": {
- *         "age": 0,
- *         "mro": [
- *           "unicode",
- *           "basestring",
- *           "object"
- *         ],
- *        "type": "unicode",
- *        "value": "label2"
- *       },
- *    }
- * }
- *
- * While the server expects this:
- * { "name": "label2" }
- *
- *
- * @param {*} richlyTypedValue JSON-encoded RDFValue with rich type information.
- * @return {*} Same RDFValue but with all type information stripped.
- */
-exports.stripTypeInfo = function(richlyTypedValue) {
-  var recursiveStrip = function(value) {
-    if (angular.isArray(value)) {
-      value = value.map(recursiveStrip);
-    } else if (angular.isDefined(value.value)) {
-      value = value.value;
-      if (angular.isObject(value)) {
-        for (var k in value) {
-          value[k] = recursiveStrip(value[k]);
-        }
-      }
-    }
-    return value;
-  };
-
-  return recursiveStrip(angular.copy(richlyTypedValue));
-};
-var stripTypeInfo = exports.stripTypeInfo;
-
 
 /**
  * Wraps a promise so that then/catch/finally calls preserve the custom
@@ -146,23 +88,23 @@ var wrapCancellablePromise_ = function(promise) {
  */
 exports.ApiService = function(
     $http, $q, $interval, $rootScope, grrLoadingIndicatorService) {
-  /** @private {angular.$http} */
-  this.http_ = $http;
+    /** @private {angular.$http} */
+    this.http_ = $http;
 
-  /** @private {!angular.$q} */
-  this.q_ = $q;
+    /** @private {!angular.$q} */
+    this.q_ = $q;
 
-  /** @private {!angular.$interval} */
-  this.interval_ = $interval;
+    /** @private {!angular.$interval} */
+    this.interval_ = $interval;
 
-  /** @private {angular.Scope} */
-  this.rootScope_ = $rootScope;
+    /** @private {angular.Scope} */
+    this.rootScope_ = $rootScope;
 
-  /** @private {grrUi.core.loadingIndicatorService.LoadingIndicatorService} */
-  this.grrLoadingIndicatorService_ = grrLoadingIndicatorService;
+    /** @private {grrUi.core.loadingIndicatorService.LoadingIndicatorService} */
+    this.grrLoadingIndicatorService_ = grrLoadingIndicatorService;
 
-  /** @private {!angular.$q.Deferred} */
-  this.authDeferred_ = this.q_.defer();
+    /** @private {!angular.$q.Deferred} */
+    this.authDeferred_ = this.q_.defer();
 };
 var ApiService = exports.ApiService;
 
@@ -183,9 +125,9 @@ ApiService.service_name = 'grrApiService';
  * @private
  */
 ApiService.prototype.waitForAuth_ = function(fn) {
-  return this.authDeferred_.promise.then(function() {
-    return fn();
-  });
+    return this.authDeferred_.promise.then(function() {
+        return fn();
+    });
 };
 
 /**
@@ -195,7 +137,7 @@ ApiService.prototype.waitForAuth_ = function(fn) {
  * @export
  */
 ApiService.prototype.markAuthDone = function() {
-  this.authDeferred_.resolve();
+    this.authDeferred_.resolve();
 };
 
 
@@ -212,28 +154,22 @@ ApiService.prototype.markAuthDone = function() {
  */
 ApiService.prototype.sendRequestWithoutPayload_ = function(
     method, apiPath, opt_params, opt_requestSettings) {
-  var requestParams = angular.extend({}, opt_params);
-  var requestSettings = angular.extend({}, opt_requestSettings);
+    var requestParams = angular.extend({}, opt_params);
+    var requestSettings = angular.extend({}, opt_requestSettings);
 
-  var loadingKey = this.grrLoadingIndicatorService_.startLoading();
-  var apiPrefix = '/api/';
-  if (requestSettings['useV2']) {
-    apiPrefix += 'v2/';
-  }
-  var url = encodeUrlPath(apiPrefix + apiPath.replace(/^\//, ''));
-
-  return this.waitForAuth_(function() {
+    var loadingKey = this.grrLoadingIndicatorService_.startLoading();
+    var apiPrefix = window.base_path+'/api/';
+    var url = encodeUrlPath(apiPrefix + apiPath.replace(/^\//, ''));
     var promise = /** @type {function(Object)} */ (this.http_)({
-      method: method,
-      url: url,
-      params: requestParams,
-      cache: requestSettings['cache']
+        method: method,
+        url: url,
+        params: requestParams,
+        cache: requestSettings['cache']
     });
 
     return promise.finally(function() {
-      this.grrLoadingIndicatorService_.stopLoading(loadingKey);
+        this.grrLoadingIndicatorService_.stopLoading(loadingKey);
     }.bind(this));
-  }.bind(this));
 };
 
 /**
@@ -247,15 +183,29 @@ ApiService.prototype.head = function(apiPath, opt_params) {
   return this.sendRequestWithoutPayload_("HEAD", apiPath, opt_params);
 };
 
-/**
- * Fetches data for a given API url via HTTP GET method.
- *
- * @param {string} apiPath API path to trigger.
- * @param {Object<string, string>=} opt_params Query parameters.
- * @return {!angular.$q.Promise} Promise that resolves to the result.
- */
-ApiService.prototype.get = function(apiPath, opt_params) {
-  return this.sendRequestWithoutPayload_("GET", apiPath, opt_params);
+
+ApiService.prototype.error_response = function(response) {
+    var self = this;
+
+    if (angular.isDefined(response.status)) {
+        var message;
+        if (response.status < 0) {
+            message = "Server unavailable";
+        } else {
+            if (angular.isObject(response.data) && angular.isString(response.data["message"])) {
+                message = "Server error: " + response.statusText + " " + response.data.message;
+            } else {
+                message = "Server error: " + response.statusText + " " +
+                    JSON.stringify(response.data);
+            }
+        }
+        this.rootScope_.$broadcast(
+            "ServerError", {
+                message: message,
+            });
+    };
+
+    return self.q_.reject(message);
 };
 
 
@@ -266,8 +216,20 @@ ApiService.prototype.get = function(apiPath, opt_params) {
  * @param {Object<string, string>=} opt_params Query parameters.
  * @return {!angular.$q.Promise} Promise that resolves to the result.
  */
-ApiService.prototype.getV2 = function(apiPath, opt_params) {
-  return this.sendRequestWithoutPayload_("GET", apiPath, opt_params, {'useV2': true});
+ApiService.prototype.get = function(apiPath, opt_params) {
+    var self = this;
+
+    return this.sendRequestWithoutPayload_("GET", apiPath, opt_params).then(
+        function (response) {
+            var token = response.headers()['x-csrf-token'];
+
+            // Update the csrf token for the next response.
+            if (angular.isString(token) && token.length > 0) {
+                window.CsrfToken = token;
+            }
+
+            return response;
+        }, this.error_response.bind(this));
 };
 
 /**
@@ -283,22 +245,6 @@ ApiService.prototype.getCached = function(apiPath, opt_params) {
   return this.sendRequestWithoutPayload_("GET", apiPath, opt_params,
                                          {cache: true});
 };
-
-
-/**
- * Fetches data for a given API url via HTTP GET method and caches the response.
- * Returns cached response immediately (without querying the server),
- * if available.
- *
- * @param {string} apiPath API path to trigger.
- * @param {Object<string, string>=} opt_params Query parameters.
- * @return {!angular.$q.Promise} Promise that resolves to the result.
- */
-ApiService.prototype.getV2Cached = function(apiPath, opt_params) {
-  return this.sendRequestWithoutPayload_("GET", apiPath, opt_params,
-                                         {cache: true, useV2: true});
-};
-
 
 /**
  * Polls a given URL every second until the given condition is satisfied
@@ -342,7 +288,10 @@ ApiService.prototype.poll = function(apiPath, intervalMs, opt_params,
       if (cancelled) {
         return;
       }
-      result.reject(response);
+        // Do not cancel the polling if there is a server
+        // error. Polling normally updates the display and
+        // intermittant failures will cause the display to break.
+        // result.reject(response);
     }.bind(this)).finally(function() {
       if (cancelled) {
         return;
@@ -393,7 +342,7 @@ ApiService.prototype.cancelPoll = function(pollPromise) {
  */
 ApiService.prototype.downloadFile = function(apiPath, opt_params) {
   var requestParams = angular.extend({}, opt_params);
-  var url = encodeUrlPath('/api/' + apiPath.replace(/^\//, ''));
+  var url = encodeUrlPath(window.base_path + '/api/' + apiPath.replace(/^\//, ''));
 
   // Using HEAD to check that there are no ACL issues when accessing url
   // in question.
@@ -461,14 +410,6 @@ ApiService.prototype.downloadFile = function(apiPath, opt_params) {
  * @param {string} apiPath API path to trigger.
  * @param {Object<string, string>=} opt_params Dictionary that will be
         sent as a POST payload.
- * @param {boolean=} opt_stripTypeInfo If true, treat opt_params as JSON-encoded
- *      RDFValue with rich type information. This type information
- *      will be stripped before opt_params is sent as a POST payload.
- *
- *      This option is useful when sending values edited with forms back to the
- *      server. Values edited by semantic forms will have rich type information
- *      in them, while server will be expecting stripped down version of the
- *      same data. See stripTypeInfo() documentation for an example.
  * @param {Object<string, File>=} opt_files Dictionary with files to be uploaded
  *      to the server.
  *
@@ -476,46 +417,23 @@ ApiService.prototype.downloadFile = function(apiPath, opt_params) {
  *
  * @private
  */
-ApiService.prototype.sendRequestWithPayload_ = function(
-    httpMethod, apiPath, opt_params, opt_stripTypeInfo, opt_files) {
-  if (opt_stripTypeInfo) {
-    opt_params = /** @type {Object<string, string>} */ (stripTypeInfo(
-        opt_params));
-  }
-
-  var request;
-  if (angular.equals(opt_files || {}, {})) {
-    request = {
-      method: httpMethod,
-      url: encodeUrlPath('/api/' + apiPath.replace(/^\//, '')),
-      data: opt_params,
-      headers: {}
+ApiService.prototype.sendRequestWithPayload_ = function(httpMethod, apiPath, opt_params) {
+    var request = {
+        method: httpMethod,
+        url: encodeUrlPath(window.base_path+'/api/' + apiPath.replace(/^\//, '')),
+        data: opt_params,
+        headers: {}
     };
-  } else {
-    var fd = new FormData();
-    angular.forEach(/** @type {Object} */(opt_files), function(value, key) {
-      fd.append(key, value);
-    }.bind(this));
-    fd.append('_params_', angular.toJson(opt_params || {}));
 
-    request = {
-      method: httpMethod,
-      url: encodeUrlPath('/api/' + apiPath.replace(/^\//, '')),
-      data: fd,
-      transformRequest: angular.identity,
-      headers: {
-        'Content-Type': undefined
-      }
-    };
-  }
-
-  return this.waitForAuth_(function() {
     var loadingKey = this.grrLoadingIndicatorService_.startLoading();
+
+    // Automatically pass the CSRF token to every request.
+    this.http_.defaults.headers.common["X-CSRF-Token"] = window.CsrfToken;
+
     var promise = /** @type {function(Object)} */ (this.http_)(request);
     return promise.finally(function() {
-      this.grrLoadingIndicatorService_.stopLoading(loadingKey);
+        this.grrLoadingIndicatorService_.stopLoading(loadingKey);
     }.bind(this));
-  }.bind(this));
 };
 
 
@@ -525,23 +443,43 @@ ApiService.prototype.sendRequestWithPayload_ = function(
  * @param {string} apiPath API path to trigger.
  * @param {Object<string, string>=} opt_params Dictionary that will be
         sent as a POST payload.
- * @param {boolean=} opt_stripTypeInfo If true, treat opt_params as JSON-encoded
- *      RDFValue with rich type information. This type information
- *      will be stripped before opt_params is sent as a POST payload.
- *
- *      This option is useful when sending values edited with forms back to the
- *      server. Values edited by semantic forms will have rich type information
- *      in them, while server will be expecting stripped down version of the
- *      same data. See stripTypeInfo() documentation for an example.
  * @param {Object<string, File>=} opt_files Dictionary with files to be uploaded
  *      to the server.
  *
  * @return {!angular.$q.Promise} Promise that resolves to the server response.
  */
-ApiService.prototype.post = function(apiPath, opt_params, opt_stripTypeInfo,
-                                     opt_files) {
-  return this.sendRequestWithPayload_(
-      'POST', apiPath, opt_params, opt_stripTypeInfo, opt_files);
+ApiService.prototype.post = function(apiPath, opt_params) {
+    return this.sendRequestWithPayload_(
+        'POST', apiPath, opt_params).then(
+            null, this.error_response.bind(this));
+};
+
+ApiService.prototype.upload = function(apiPath, files, opt_params) {
+    var fd = new FormData();
+
+    angular.forEach(files, function(value, key) {
+        fd.append(key, value);
+    }.bind(this));
+
+    fd.append('_params_', angular.toJson(opt_params || {}));
+
+    var request = {
+        method: "POST",
+        url: encodeUrlPath(window.base_path+'/api/' + apiPath.replace(/^\//, '')),
+        data: fd,
+        transformRequest: angular.identity,
+        headers: {'Content-Type': undefined}
+    };
+
+    var loadingKey = this.grrLoadingIndicatorService_.startLoading();
+
+    // Automatically pass the CSRF token to every request.
+    this.http_.defaults.headers.common["X-CSRF-Token"] = window.CsrfToken;
+
+    var promise = /** @type {function(Object)} */ (this.http_)(request);
+    return promise.finally(function() {
+        this.grrLoadingIndicatorService_.stopLoading(loadingKey);
+    }.bind(this));
 };
 
 
@@ -551,19 +489,10 @@ ApiService.prototype.post = function(apiPath, opt_params, opt_stripTypeInfo,
  * @param {string} apiPath API path to trigger.
  * @param {Object<string, string>=} opt_params Dictionary that will be
         sent as a DELETE payload.
- * @param {boolean=} opt_stripTypeInfo If true, treat opt_params as JSON-encoded
- *      RDFValue with rich type information. This type information
- *      will be stripped before opt_params is sent as a POST payload.
- *
- *      This option is useful when sending values edited with forms back to the
- *      server. Values edited by semantic forms will have rich type information
- *      in them, while server will be expecting stripped down version of the
- *      same data. See stripTypeInfo() documentation for an example.
  * @return {!angular.$q.Promise} Promise that resolves to the result.
  */
-ApiService.prototype.delete = function(apiPath, opt_params, opt_stripTypeInfo) {
-  return this.sendRequestWithPayload_(
-      'DELETE', apiPath, opt_params, opt_stripTypeInfo);
+ApiService.prototype.delete = function(apiPath, opt_params) {
+  return this.sendRequestWithPayload_('DELETE', apiPath, opt_params);
 };
 
 
@@ -573,17 +502,8 @@ ApiService.prototype.delete = function(apiPath, opt_params, opt_stripTypeInfo) {
  * @param {string} apiPath API path to trigger.
  * @param {Object<string, string>=} opt_params Dictionary that will be
         sent as a UDATE payload.
- * @param {boolean=} opt_stripTypeInfo If true, treat opt_params as JSON-encoded
- *      RDFValue with rich type information. This type information
- *      will be stripped before opt_params is sent as a POST payload.
- *
- *      This option is useful when sending values edited with forms back to the
- *      server. Values edited by semantic forms will have rich type information
- *      in them, while server will be expecting stripped down version of the
- *      same data. See stripTypeInfo() documentation for an example.
  * @return {!angular.$q.Promise} Promise that resolves to the result.
  */
-ApiService.prototype.patch = function(apiPath, opt_params, opt_stripTypeInfo) {
-  return this.sendRequestWithPayload_(
-      'PATCH', apiPath, opt_params, opt_stripTypeInfo);
+ApiService.prototype.patch = function(apiPath, opt_params) {
+  return this.sendRequestWithPayload_('PATCH', apiPath, opt_params);
 };

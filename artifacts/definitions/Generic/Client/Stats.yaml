@@ -7,15 +7,28 @@ parameters:
 type: CLIENT_EVENT
 
 sources:
-  - queries:
-      - |
-        SELECT * from foreach(
+  - precondition: SELECT OS From info() where OS = 'windows'
+    queries:
+      - SELECT * from foreach(
          row={
            SELECT UnixNano FROM clock(period=atoi(string=Frequency))
          },
          query={
            SELECT UnixNano / 1000000000 as Timestamp,
-                  Times.user + Times.system as CPU,
+                  User + System as CPU,
+                  Memory.WorkingSetSize as RSS
+           FROM pslist(pid=getpid())
+         })
+
+  - precondition: SELECT OS From info() where OS != 'windows'
+    queries:
+      - SELECT * from foreach(
+         row={
+           SELECT UnixNano FROM clock(period=atoi(string=Frequency))
+         },
+         query={
+           SELECT UnixNano / 1000000000 as Timestamp,
+                  Times.system + Times.user as CPU,
                   MemoryInfo.RSS as RSS
            FROM pslist(pid=getpid())
          })
@@ -44,9 +57,9 @@ reports:
 
       {{ $client_info := Query "SELECT * FROM clients(client_id=ClientId) LIMIT 1" }}
 
-      # Client Footprint for {{ Get $client_info "0.OsInfo.Fqdn" }}
+      # Client Footprint for {{ Get $client_info "0.os_info.fqdn" }}
 
-      The client has a client ID of {{ Get $client_info "0.ClientId" }}.
+      The client has a client ID of {{ Get $client_info "0.client_id" }}.
       Clients report the Velociraptor process footprint to the
       server every 10 seconds. The data includes the total CPU
       utilization, and the resident memory size used by the client.

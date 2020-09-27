@@ -1,4 +1,4 @@
-// +build windows
+// +build windows,cgo
 
 /*
    Velociraptor - Hunting Evil
@@ -34,29 +34,34 @@ import (
 	"runtime"
 	"unsafe"
 
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/acls"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
-
-type ProcDumpArgs struct {
-	Pid int64 `vfilter:"required,field=pid,doc=The PID to dump out."`
-}
 
 type ProcDumpPlugin struct{}
 
 func (self ProcDumpPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
-	arg := &ProcDumpArgs{}
+	arg := &PidArgs{}
 
 	go func() {
 		defer close(output_chan)
+
+		err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
+		if err != nil {
+			scope.Log("proc_dump: %s", err)
+			return
+		}
+
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 
-		err := vfilter.ExtractArgs(scope, args, arg)
+		err = vfilter.ExtractArgs(scope, args, arg)
 		if err != nil {
 			scope.Log("proc_dump: %s", err.Error())
 			return
@@ -90,9 +95,14 @@ func (self ProcDumpPlugin) Call(
 			return
 		}
 
-		output_chan <- vfilter.NewDict().
+		select {
+		case <-ctx.Done():
+			return
+
+		case output_chan <- ordereddict.NewDict().
 			Set("FullPath", filename).
-			Set("Pid", arg.Pid)
+			Set("Pid", arg.Pid):
+		}
 	}()
 
 	return output_chan
@@ -102,7 +112,7 @@ func (self ProcDumpPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap)
 	return &vfilter.PluginInfo{
 		Name:    "proc_dump",
 		Doc:     "Dumps process memory.",
-		ArgType: type_map.AddType(scope, &ProcDumpArgs{}),
+		ArgType: type_map.AddType(scope, &PidArgs{}),
 	}
 }
 

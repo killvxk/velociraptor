@@ -1,4 +1,0 @@
-# The configuration file to run on appveyor
-Datastore:
-  filestore_directory: C:\velociraptor\artifacts\testdata\server
-  location: C:\velociraptor\artifacts\testdata\server

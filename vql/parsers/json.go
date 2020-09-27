@@ -18,15 +18,18 @@
 package parsers
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"reflect"
 	"strconv"
 	"strings"
 
+	"github.com/Velocidex/ordereddict"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/golang/protobuf/ptypes/any"
+	"www.velocidex.com/golang/velociraptor/glob"
 	utils "www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
@@ -47,7 +50,7 @@ func (self ParseJsonFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeM
 
 func (self ParseJsonFunction) Call(
 	ctx context.Context, scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &ParseJsonFunctionArg{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -55,8 +58,8 @@ func (self ParseJsonFunction) Call(
 		return &vfilter.Null{}
 	}
 
-	result := make(map[string]interface{})
-	err = json.Unmarshal([]byte(arg.Data), &result)
+	result := ordereddict.NewDict()
+	err = json.Unmarshal([]byte(arg.Data), result)
 	if err != nil {
 		scope.Log("parse_json: %v", err)
 		return &vfilter.Null{}
@@ -76,21 +79,123 @@ func (self ParseJsonArray) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap)
 
 func (self ParseJsonArray) Call(
 	ctx context.Context, scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &ParseJsonFunctionArg{}
 	err := vfilter.ExtractArgs(scope, args, arg)
-	if err != nil {
-		scope.Log("parse_json: %v", err)
-		return &vfilter.Null{}
-	}
-
-	result := []interface{}{}
-	err = json.Unmarshal([]byte(arg.Data), &result)
 	if err != nil {
 		scope.Log("parse_json_array: %v", err)
 		return &vfilter.Null{}
 	}
+
+	result_array := []json.RawMessage{}
+	err = json.Unmarshal([]byte(arg.Data), &result_array)
+	if err != nil {
+		scope.Log("parse_json_array: %v", err)
+		return &vfilter.Null{}
+	}
+
+	result := make([]vfilter.Any, 0, len(result_array))
+	for _, item := range result_array {
+		dict := ordereddict.NewDict()
+		err = json.Unmarshal(item, dict)
+		if err != nil {
+			// It might not be a dict - support any value.
+			var any_value interface{}
+			err = json.Unmarshal(item, &any_value)
+			if err != nil {
+				scope.Log("parse_json_array: %v", err)
+				return &vfilter.Null{}
+			}
+
+			result = append(result, any_value)
+			continue
+		}
+
+		result = append(result, dict)
+	}
+
 	return result
+}
+
+type ParseJsonlPluginArgs struct {
+	Filename string `vfilter:"required,field=filename,doc=JSON file to open"`
+	Accessor string `vfilter:"optional,field=accessor,doc=The accessor to use"`
+}
+
+type ParseJsonlPlugin struct{}
+
+func (self ParseJsonlPlugin) Call(
+	ctx context.Context,
+	scope *vfilter.Scope,
+	args *ordereddict.Dict) <-chan vfilter.Row {
+	output_chan := make(chan vfilter.Row)
+
+	go func() {
+		defer close(output_chan)
+
+		arg := &ParseJsonlPluginArgs{}
+		err := vfilter.ExtractArgs(scope, args, arg)
+		if err != nil {
+			scope.Log("parse_jsonl: %s", err.Error())
+			return
+		}
+
+		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+		if err != nil {
+			scope.Log("parse_jsonl: %s", err)
+			return
+		}
+
+		accessor, err := glob.GetAccessor(arg.Accessor, scope)
+		if err != nil {
+			scope.Log("parse_jsonl: %v", err)
+			return
+		}
+
+		fd, err := accessor.Open(arg.Filename)
+		if err != nil {
+			scope.Log("Unable to open file %s: %v",
+				arg.Filename, err)
+			return
+		}
+		defer fd.Close()
+
+		reader := bufio.NewReader(fd)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+
+			default:
+				row_data, err := reader.ReadBytes('\n')
+				if err != nil {
+					return
+				}
+				item := ordereddict.NewDict()
+				err = item.UnmarshalJSON(row_data)
+				if err != nil {
+					return
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- item:
+				}
+			}
+		}
+	}()
+
+	return output_chan
+}
+
+func (self ParseJsonlPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.PluginInfo {
+	return &vfilter.PluginInfo{
+		Name:    "parse_jsonl",
+		Doc:     "Parses a line oriented json file.",
+		ArgType: type_map.AddType(scope, &ParseJsonlPluginArgs{}),
+	}
 }
 
 type ParseJsonArrayPlugin struct{}
@@ -98,7 +203,7 @@ type ParseJsonArrayPlugin struct{}
 func (self ParseJsonArrayPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
@@ -107,9 +212,14 @@ func (self ParseJsonArrayPlugin) Call(
 		result := ParseJsonArray{}.Call(ctx, scope, args)
 		result_value := reflect.Indirect(reflect.ValueOf(result))
 		result_type := result_value.Type()
-		if result_type.Kind() != reflect.Slice {
+		if result_type.Kind() == reflect.Slice {
 			for i := 0; i < result_value.Len(); i++ {
-				output_chan <- result_value.Index(i).Interface()
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- result_value.Index(i).Interface():
+				}
 			}
 		}
 
@@ -122,7 +232,7 @@ func (self ParseJsonArrayPlugin) Info(scope *vfilter.Scope, type_map *vfilter.Ty
 	return &vfilter.PluginInfo{
 		Name:    "parse_json_array",
 		Doc:     "Parses events from a line oriented json file.",
-		ArgType: type_map.AddType(scope, &ParseJsonArrayPlugin{}),
+		ArgType: type_map.AddType(scope, &ParseJsonFunctionArg{}),
 	}
 }
 
@@ -268,12 +378,33 @@ func (self _ProtobufAssociativeProtocol) GetMembers(
 
 	for _, item := range properties.Prop {
 		// Only real exported fields should be collected.
-		if len(item.JSONName) > 0 {
+		if len(item.OrigName) > 0 && !strings.HasPrefix(item.OrigName, "XXX") {
 			result = append(result, item.OrigName)
 		}
 	}
 
 	return result
+}
+
+type _nilAssociativeProtocol struct{}
+
+func (self _nilAssociativeProtocol) Applicable(
+	a vfilter.Any, b vfilter.Any) bool {
+
+	value := reflect.ValueOf(a)
+	return value.Kind() == reflect.Ptr && value.IsNil()
+}
+
+func (self _nilAssociativeProtocol) Associative(
+	scope *vfilter.Scope, a vfilter.Any, b vfilter.Any) (
+	vfilter.Any, bool) {
+
+	return vfilter.Null{}, false
+}
+
+func (self _nilAssociativeProtocol) GetMembers(
+	scope *vfilter.Scope, a vfilter.Any) []string {
+	return []string{}
 }
 
 // Allow a slice to be accessed by a field
@@ -337,8 +468,10 @@ func (self _IndexAssociativeProtocol) GetMembers(
 func init() {
 	vql_subsystem.RegisterFunction(&ParseJsonFunction{})
 	vql_subsystem.RegisterFunction(&ParseJsonArray{})
+	vql_subsystem.RegisterProtocol(&_nilAssociativeProtocol{})
 	vql_subsystem.RegisterProtocol(&_MapInterfaceAssociativeProtocol{})
 	vql_subsystem.RegisterProtocol(&_ProtobufAssociativeProtocol{})
 	vql_subsystem.RegisterProtocol(&_IndexAssociativeProtocol{})
 	vql_subsystem.RegisterPlugin(&ParseJsonArrayPlugin{})
+	vql_subsystem.RegisterPlugin(&ParseJsonlPlugin{})
 }

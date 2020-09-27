@@ -31,7 +31,6 @@ import (
 
 	errors "github.com/pkg/errors"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
-	config "www.velocidex.com/golang/velociraptor/config"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/utils"
 )
@@ -46,9 +45,14 @@ var (
 )
 
 func doRemove() error {
-	config_obj, err := config.LoadClientConfig(*config_path)
+	config_obj, err := DefaultConfigLoader.WithRequiredClient().
+		WithWriteback().LoadAndValidate()
 	if err != nil {
 		return errors.Wrap(err, "Unable to load config file")
+	}
+
+	if config_obj.Client.DarwinInstaller == nil {
+		return errors.New("DarwinInstaller not configured")
 	}
 
 	service_name := config_obj.Client.DarwinInstaller.ServiceName
@@ -61,7 +65,8 @@ func doRemove() error {
 }
 
 func doInstall() error {
-	config_obj, err := config.LoadClientConfig(*config_path)
+	config_obj, err := DefaultConfigLoader.WithRequiredClient().
+		WithWriteback().LoadAndValidate()
 	if err != nil {
 		return errors.Wrap(err, "Unable to load config file")
 	}
@@ -73,7 +78,8 @@ func doInstall() error {
 	logger := logging.GetLogger(config_obj, &logging.ClientComponent)
 	target_path := os.ExpandEnv(config_obj.Client.DarwinInstaller.InstallPath)
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Try to copy the executable to the target_path.
 	err = utils.CopyFile(ctx, executable, target_path, 0755)

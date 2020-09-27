@@ -32,8 +32,10 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/Velocidex/ordereddict"
 	pointer "github.com/mattn/go-pointer"
 	"golang.org/x/net/dns/dnsmessage"
+	"www.velocidex.com/golang/velociraptor/acls"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -169,14 +171,20 @@ type DNSEventPlugin struct{}
 func (self DNSEventPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	arg := &DNSEventPluginArgs{}
 
 	go func() {
 		defer close(output_chan)
 
-		err := vfilter.ExtractArgs(scope, args, arg)
+		err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
+		if err != nil {
+			scope.Log("dns: %s", err)
+			return
+		}
+
+		err = vfilter.ExtractArgs(scope, args, arg)
 		if err != nil {
 			scope.Log("dns: %s", err.Error())
 			return
@@ -213,7 +221,7 @@ func (self DNSEventPlugin) Call(
 			defer close(event_context.output)
 		}()
 
-		for {
+		for item := range event_context.output {
 			select {
 			case <-sub_ctx.Done():
 				return
@@ -221,11 +229,8 @@ func (self DNSEventPlugin) Call(
 				// Read the next item from the event
 				// queue and send it to the VQL
 				// subsystem.
-			case item, ok := <-event_context.output:
-				if !ok {
-					return
-				}
-				output_chan <- item
+
+			case output_chan <- item:
 			}
 		}
 	}()

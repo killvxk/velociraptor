@@ -18,54 +18,31 @@ const FlowOverviewController = function(
     this.scope_ = $scope;
     this.grrApiService_ = grrApiService;
     this.rootScope_ = $rootScope;
+
+    this.uiTraits = {};
+    this.grrApiService_.getCached('v1/GetUserUITraits').then(function(response) {
+        this.uiTraits = response.data['interface_traits'];
+    }.bind(this), function(error) {
+        if (error['status'] == 403) {
+            this.error = 'Authentication Error';
+        } else {
+            this.error = error['statusText'] || ('Error');
+        }
+    }.bind(this));
 };
 
 
-/**
- * Downloads the file.
- *
- * @export
- */
-FlowOverviewController.prototype.downloadFile = function() {
-    var flow = this.scope_["flow"];
-    var clientId = flow['client_id'];
-    var flow_id = flow['flow_id'];
-    var filename = clientId + '/' + flow_id;
-
-    // Sanitize filename for download.
-    var url = 'v1/download/' + filename.replace(/[^./a-zA-Z0-9]+/g, '_');
-    this.grrApiService_.downloadFile(url).then(
-        function success() {}.bind(this),
-        function failure(response) {
-            if (angular.isUndefined(response.status)) {
-                this.rootScope_.$broadcast(
-                    ERROR_EVENT_NAME, {
-                        message: 'Couldn\'t download file.'
-                    });
-            }
-        }.bind(this)
-    );
-};
-
-
-FlowOverviewController.prototype.prepareDownload = function() {
+FlowOverviewController.prototype.prepareDownload = function(download_type) {
   // Sanitize filename for download.
-  var flow = this.scope_["flow"];
+  var flow = this.scope_["flow"]["context"];
   var url = 'v1/CreateDownload';
   var params = {
-    flow_id: flow['flow_id'],
-    client_id: flow['client_id'],
+      flow_id: flow['session_id'],
+      client_id: flow["request"]['client_id'],
+      download_type: download_type || "",
   };
   this.grrApiService_.post(url, params).then(
-        function success() {}.bind(this),
-        function failure(response) {
-            if (angular.isUndefined(response.status)) {
-                this.rootScope_.$broadcast(
-                    ERROR_EVENT_NAME, {
-                        message: 'Couldn\'t download file.'
-                    });
-            }
-        }.bind(this)
+        function success() {}.bind(this)
     );
 };
 
@@ -81,10 +58,10 @@ exports.FlowOverviewDirective = function() {
       scope: {
           flow: '=',
           flowId: '=',
-          apiBasePath: '='
+          clientId: '='
       },
       restrict: 'E',
-      templateUrl: '/static/angular-components/flow/flow-overview.html',
+      templateUrl: window.base_path+'/static/angular-components/flow/flow-overview.html',
       controller: FlowOverviewController,
       controllerAs: 'controller'
   };

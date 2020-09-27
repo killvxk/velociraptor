@@ -1,11 +1,10 @@
 syntax = "proto3";
 
-import "www.velocidex.com/golang/velociraptor/artifacts/proto/artifact.proto";
-import "www.velocidex.com/golang/velociraptor/flows/proto/artifacts.proto";
-import "www.velocidex.com/golang/velociraptor/flows/proto/flows.proto";
-import "www.velocidex.com/golang/velociraptor/flows/proto/vfs.proto";
-import "www.velocidex.com/golang/velociraptor/proto/semantic.proto";
-import "www.velocidex.com/golang/velociraptor/actions/proto/vql.proto";
+import "artifacts/proto/artifact.proto";
+import "flows/proto/artifact_collector.proto";
+import "flows/proto/vfs.proto";
+import "proto/semantic.proto";
+import "actions/proto/vql.proto";
 import "google/api/annotations.proto";
 import "google/protobuf/empty.proto";
 
@@ -14,15 +13,18 @@ import "artifacts.proto";
 import "clients.proto";
 import "hunts.proto";
 import "flows.proto";
+import "notebooks.proto";
 import "users.proto";
 import "csv.proto";
 import "download.proto";
+import "completions.proto";
 
 package proto;
 
+option go_package = "www.velocidex.com/golang/velociraptor/api/proto";
+
 message StartFlowResponse {
     string flow_id = 1;
-    FlowRunnerArgs runner_args = 2;
 }
 
 message Approval {
@@ -129,6 +131,19 @@ service API {
         };
     }
 
+    rpc GetClientMetadata(GetClientRequest) returns (ClientMetadata) {
+        option (google.api.http) = {
+            get: "/api/v1/GetClientMetadata/{client_id}",
+        };
+    }
+
+    rpc SetClientMetadata(ClientMetadata) returns (google.protobuf.Empty) {
+        option (google.api.http) = {
+            post: "/api/v1/SetClientMetadata",
+            body: "*"
+        };
+    }
+
     rpc GetClientFlows(ApiFlowRequest) returns (ApiFlowResponse) {
         option (google.api.http) = {
             get: "/api/v1/GetClientFlows/{client_id}",
@@ -148,6 +163,13 @@ service API {
         };
     }
 
+    rpc SetGUIOptions(SetGUIOptionsRequest) returns (google.protobuf.Empty) {
+        option (google.api.http) = {
+           post: "/api/v1/SetGUIOptions",
+           body: "*"
+        };
+    }
+
     rpc GetUserNotifications(GetUserNotificationsRequest) returns (GetUserNotificationsResponse) {
         option (google.api.http) = {
             post: "/api/v1/GetUserNotifications",
@@ -161,24 +183,38 @@ service API {
         };
     }
 
+    // List all the GUI users known on this server.
+    rpc GetUsers(google.protobuf.Empty) returns(Users) {
+        option (google.api.http) = {
+            get: "/api/v1/GetUsers",
+        };
+    }
+
     // VFS
-    rpc VFSListDirectory(VFSListRequest) returns (VQLResponse) {
+    rpc VFSListDirectory(VFSListRequest) returns (VFSListResponse) {
         option (google.api.http) = {
             get: "/api/v1/VFSListDirectory/{client_id}",
         };
     }
 
-    rpc VFSRefreshDirectory(VFSRefreshDirectoryRequest) returns (StartFlowResponse) {
+    rpc VFSRefreshDirectory(VFSRefreshDirectoryRequest) returns (ArtifactCollectorResponse) {
         option (google.api.http) = {
-            post: "/api/v1/VFSRefreshDirectory/{client_id}",
+            post: "/api/v1/VFSRefreshDirectory",
             body: "*",
         };
     }
 
-    rpc VFSGetBuffer(VFSFileBuffer) returns (VFSFileBuffer) {
-        // Not accessible via the GUI - the gui can access the
-        // download handlers directly.
-    };
+    rpc VFSStatDirectory(VFSListRequest) returns (VFSListResponse) {
+        option (google.api.http) = {
+            get: "/api/v1/VFSStatDirectory",
+        };
+    }
+
+    rpc VFSStatDownload(VFSStatDownloadRequest) returns (VFSDownloadInfo) {
+        option (google.api.http) = {
+            get: "/api/v1/VFSStatDownload",
+        };
+    }
 
     rpc GetTable(GetTableRequest) returns (GetTableResponse) {
         option (google.api.http) = {
@@ -187,9 +223,9 @@ service API {
     }
 
     // Flows
-    rpc LaunchFlow(FlowRunnerArgs) returns (StartFlowResponse) {
+    rpc CollectArtifact(ArtifactCollectorArgs) returns (ArtifactCollectorResponse) {
         option (google.api.http) = {
-            post: "/api/v1/LaunchFlow",
+            post: "/api/v1/CollectArtifact",
             body: "*"
         };
     }
@@ -209,21 +245,21 @@ service API {
     }
 
 
-    rpc GetFlowDetails(ApiFlowRequest) returns (ApiFlow) {
+    rpc GetFlowDetails(ApiFlowRequest) returns (FlowDetails) {
         option (google.api.http) = {
-            get: "/api/v1/GetFlowDetails/{client_id}",
+            get: "/api/v1/GetFlowDetails",
         };
     }
 
     rpc GetFlowRequests(ApiFlowRequest) returns (ApiFlowRequestDetails) {
         option (google.api.http) = {
-            get: "/api/v1/GetFlowDetails/{client_id}/{flow_id}/requests",
+            get: "/api/v1/GetFlowRequests",
         };
     }
 
-    rpc DescribeTypes(google.protobuf.Empty) returns (Types) {
+    rpc GetKeywordCompletions(google.protobuf.Empty) returns (KeywordCompletions) {
         option (google.api.http) = {
-            get: "/api/v1/DescribeTypes",
+            get: "/api/v1/GetKeywordCompletions",
         };
     }
 
@@ -247,6 +283,27 @@ service API {
         };
     }
 
+    rpc LoadArtifactPack(VFSFileBuffer) returns (LoadArtifactPackResponse) {
+        option (google.api.http) = {
+            post: "/api/v1/LoadArtifactPack",
+            body: "*",
+        };
+    }
+
+    // Tools
+    rpc GetToolInfo(Tool) returns (Tool) {
+        option (google.api.http) = {
+            get: "/api/v1/GetToolInfo",
+        };
+    }
+
+    rpc SetToolInfo(Tool) returns (Tool) {
+        option (google.api.http) = {
+            post: "/api/v1/SetToolInfo",
+            body: "*",
+        };
+    }
+
     // Reporting and post processing.
     rpc GetReport(GetReportRequest) returns (GetReportResponse) {
         option (google.api.http) = {
@@ -254,9 +311,6 @@ service API {
             body: "*",
         };
     }
-
-    // Streaming free form VQL - Not available over http.
-    rpc Query(VQLCollectorArgs) returns (stream VQLResponse) {}
 
     // Server Monitoring Artifacts - manage the Server Monitoring
     // Service..
@@ -277,7 +331,7 @@ service API {
 
     // Client Monitoring Artifacts - manage the Client Monitoring
     // Service.
-    rpc GetClientMonitoringState(google.protobuf.Empty) returns (ArtifactCollectorArgs) {
+    rpc GetClientMonitoringState(google.protobuf.Empty) returns (ClientEventTable) {
         option (google.api.http) = {
             get: "/api/v1/GetClientMonitoringState",
         };
@@ -285,25 +339,109 @@ service API {
 
     // Client Monitoring Artifacts - manage the Client Monitoring
     // Service.
-    rpc SetClientMonitoringState(ArtifactCollectorArgs) returns (ArtifactCollectorArgs) {
+    rpc SetClientMonitoringState(ClientEventTable) returns (google.protobuf.Empty) {
         option (google.api.http) = {
             post: "/api/v1/SetClientMonitoringState",
             body: "*",
         };
     }
 
-    rpc ListAvailableEventResults(ListAvailableEventResultsRequest)
+  rpc ListAvailableEventResults(ListAvailableEventResultsRequest)
         returns (ListAvailableEventResultsResponse) {
         option (google.api.http) = {
-            get: "/api/v1/ListAvailableEventResults",
+            post: "/api/v1/ListAvailableEventResults",
+            body: "*",
         };
     }
 
     // Schedule downloads.
-    rpc CreateDownloadFile(CreateDownloadRequest) returns (google.protobuf.Empty) {
+    rpc CreateDownloadFile(CreateDownloadRequest) returns (CreateDownloadResponse) {
         option (google.api.http) = {
             post: "/api/v1/CreateDownload",
             body: "*",
         };
     }
+
+    // Notebook management
+   rpc GetNotebooks(NotebookCellRequest) returns (Notebooks) {
+        option (google.api.http) = {
+            get: "/api/v1/GetNotebooks",
+        };
+    }
+
+   rpc NewNotebook(NotebookMetadata) returns (google.protobuf.Empty) {
+        option (google.api.http) = {
+            post: "/api/v1/NewNotebook",
+            body: "*",
+        };
+    }
+
+   rpc UpdateNotebook(NotebookMetadata) returns (NotebookMetadata) {
+        option (google.api.http) = {
+            post: "/api/v1/UpdateNotebook",
+            body: "*",
+        };
+    }
+
+    rpc NewNotebookCell(NotebookCellRequest) returns (NotebookMetadata) {
+        option (google.api.http) = {
+            post: "/api/v1/NewNotebookCell",
+            body: "*",
+        };
+    }
+
+   rpc GetNotebookCell(NotebookCellRequest) returns (NotebookCell) {
+        option (google.api.http) = {
+            get: "/api/v1/GetNotebookCell",
+        };
+    }
+
+   rpc UpdateNotebookCell(NotebookCellRequest) returns (NotebookCell) {
+        option (google.api.http) = {
+            post: "/api/v1/UpdateNotebookCell",
+            body: "*",
+        };
+    }
+
+   rpc CancelNotebookCell(NotebookCellRequest) returns (google.protobuf.Empty) {
+        option (google.api.http) = {
+            post: "/api/v1/CancelNotebookCell",
+            body: "*",
+        };
+    }
+
+    rpc CreateNotebookDownloadFile(NotebookExportRequest) returns (google.protobuf.Empty) {
+        option (google.api.http) = {
+            post: "/api/v1/CreateNotebookDownloadFile",
+            body: "*",
+        };
+    }
+
+    rpc UploadNotebookAttachment(NotebookFileUploadRequest) returns (NotebookFileUploadResponse) {
+        option (google.api.http) = {
+            post: "/api/v1/UploadNotebookAttachment",
+            body: "*",
+        };
+    }
+
+    rpc ExportNotebook(NotebookExportRequest) returns (google.protobuf.Empty) {
+        option (google.api.http) = {
+            post: "/api/v1/ExportNotebook",
+            body: "*",
+        };
+    }
+
+    // The below are API client methods - not available over HTTP
+
+    // This can be used by API clients to fetch file content.
+    rpc VFSGetBuffer(VFSFileBuffer) returns (VFSFileBuffer) {
+        // Not accessible via the GUI - the gui can access the
+        // download handlers directly.
+    };
+
+    // Streaming free form VQL.
+    rpc Query(VQLCollectorArgs) returns (stream VQLResponse) {}
+
+    // Push monitoring event to the server.
+    rpc WriteEvent(VQLResponse) returns (google.protobuf.Empty) {}
 }

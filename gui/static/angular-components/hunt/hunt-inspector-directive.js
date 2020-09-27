@@ -3,10 +3,8 @@
 goog.module('grrUi.hunt.huntInspectorDirective');
 goog.module.declareLegacyNamespace();
 
-
-
 /** @type {number} */
-let AUTO_REFRESH_INTERVAL_MS = 15 * 1000;
+let AUTO_REFRESH_INTERVAL_MS = 5 * 1000;
 
 /**
  * Sets the delay between automatic refreshes.
@@ -27,44 +25,66 @@ exports.setAutoRefreshInterval = function(millis) {
  * @ngInject
  */
 const HuntInspectorController = function(
-    $scope, grrApiService, grrRoutingService) {
-  /** @private {!angular.Scope} */
-  this.scope_ = $scope;
+    $scope, grrApiService, grrRoutingService, grrAceService) {
+    /** @private {!angular.Scope} */
+    this.scope_ = $scope;
 
-  /** @type {string} */
-  this.shownHuntId;
+    /** @type {string} */
+    this.shownHuntId;
 
-  /** @type {string} */
-  this.activeTab = '';
+    /** @type {string} */
+    this.activeTab = '';
 
-  /** type {Object<string, boolean>} */
-  this.tabsShown = {};
+    /** type {Object<string, boolean>} */
+    this.tabsShown = {};
 
     this.scope_.$watchGroup(['huntId', 'activeTab'],
                             this.onDirectiveArgumentsChange_.bind(this));
 
     this.scope_.$watch('controller.activeTab', this.onTabChange_.bind(this));
 
-  /** @private {!grrUi.core.apiService.ApiService} */
-  this.grrApiService_ = grrApiService;
+    /** @private {!grrUi.core.apiService.ApiService} */
+    this.grrApiService_ = grrApiService;
 
-  /** @private {!grrUi.routing.routingService.RoutingService} */
-  this.grrRoutingService_ = grrRoutingService;
+    /** @private {!grrUi.routing.routingService.RoutingService} */
+    this.grrRoutingService_ = grrRoutingService;
 
-  /** @export {string} */
-  this.huntId;
+    this.hunt = {};
 
-  /** @export {Object} */
-  this.hunt;
+    /** @private {!angular.$q.Promise|undefined} */
+    this.pollPromise_;
 
-  /** @private {!angular.$q.Promise|undefined} */
-  this.pollPromise_;
+    this.scope_.$on('$destroy', function() {
+        this.grrApiService_.cancelPoll(this.pollPromise_);
+    }.bind(this));
 
-  this.scope_.$on('$destroy', function() {
-    this.grrApiService_.cancelPoll(this.pollPromise_);
-  }.bind(this));
+    this.scope_.$watch('huntId', this.startPolling_.bind(this));
 
-  this.scope_.$watch('huntId', this.startPolling_.bind(this));
+    this.serializedRequests = "";
+
+    var self = this;
+
+    this.scope_.aceConfig = function(ace) {
+        self.ace = ace;
+        grrAceService.AceConfig(ace);
+
+        ace.setOptions({
+            wrap: true,
+            autoScrollEditorIntoView: true,
+            minLines: 10,
+            maxLines: 100,
+        });
+
+        self.scope_.$on('$destroy', function() {
+            grrAceService.SaveAceConfig(ace);
+        });
+
+        ace.resize();
+    };
+};
+
+HuntInspectorController.prototype.showSettings = function() {
+    this.ace.execCommand("showSettingsMenu");
 };
 
 /**
@@ -73,26 +93,29 @@ const HuntInspectorController = function(
  * @private
  */
 HuntInspectorController.prototype.startPolling_ = function() {
-  this.grrApiService_.cancelPoll(this.pollPromise_);
-  this.pollPromise_ = undefined;
+    var self = this;
 
-  if (angular.isDefined(this.scope_['huntId'])) {
-      // FIXME: Remove the aff4 path from this.
-      var huntId = this.scope_['huntId'];
-      var components = huntId.split("/");
-      this.huntId = components[components.length-1];
+    self.grrApiService_.cancelPoll(self.pollPromise_);
+    self.pollPromise_ = undefined;
 
-    this.pollPromise_ = this.grrApiService_.poll(
-      'v1/GetHunt',
-      AUTO_REFRESH_INTERVAL_MS,
-      {hunt_id: this.huntId});
-    this.pollPromise_.then(
-        undefined,
-        undefined,
-        function notify(response) {
-            this.hunt = response['data'];
-        }.bind(this));
-  }
+    if (angular.isDefined(self.scope_['huntId'])) {
+        var huntId = self.scope_['huntId'];
+        self.pollPromise_ = self.grrApiService_.poll(
+            'v1/GetHunt',
+            AUTO_REFRESH_INTERVAL_MS,
+            {hunt_id: huntId});
+        self.pollPromise_.then(
+            undefined,
+            undefined,
+            function notify(response) {
+                self.hunt = response['data'];
+                if (angular.isObject(self.hunt.start_request) &&
+                    angular.isObject(self.hunt.start_request.compiled_collector_args)) {
+                    self.serializedRequests = JSON.stringify(
+                        self.hunt.start_request.compiled_collector_args, null, 4);
+                }
+            });
+    }
 };
 
 /**
@@ -132,7 +155,7 @@ exports.HuntInspectorDirective = function() {
       activeTab: '=?'
     },
     restrict: 'E',
-    templateUrl: '/static/angular-components/hunt/hunt-inspector.html',
+    templateUrl: window.base_path+'/static/angular-components/hunt/hunt-inspector.html',
     controller: HuntInspectorController,
     controllerAs: 'controller'
   };

@@ -25,10 +25,21 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"sync"
 
+	"github.com/Velocidex/ordereddict"
 	glob "www.velocidex.com/golang/velociraptor/glob"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
+)
+
+var (
+	pool = sync.Pool{
+		New: func() interface{} {
+			buffer := make([]byte, 1024*1024) // 1Mb chunks
+			return &buffer
+		},
+	}
 )
 
 type HashResult struct {
@@ -51,30 +62,39 @@ type HashFunction struct{}
 
 func (self *HashFunction) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &HashFunctionArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
 		scope.Log("hash: %s", err.Error())
-		return false
+		return vfilter.Null{}
 	}
 
 	if arg.Path == "" {
 		return vfilter.Null{}
 	}
 
-	buf := make([]byte, 4*1024*1024) // 4Mb chunks
+	cached_buffer := pool.Get().(*[]byte)
+	defer pool.Put(cached_buffer)
 
-	fs, err := glob.GetAccessor(arg.Accessor, ctx)
+	buf := *cached_buffer
+
+	err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
 	if err != nil {
-		scope.Log("yara: %v", err)
+		scope.Log("hash: %s", err)
+		return vfilter.Null{}
+	}
+
+	fs, err := glob.GetAccessor(arg.Accessor, scope)
+	if err != nil {
+		scope.Log("hash: %v", err)
 		return vfilter.Null{}
 	}
 
 	file, err := fs.Open(arg.Path)
 	if err != nil {
 		scope.Log("hash %s: %v", arg.Path, err.Error())
-		return false
+		return vfilter.Null{}
 	}
 	defer file.Close()
 
@@ -93,7 +113,7 @@ func (self *HashFunction) Call(ctx context.Context,
 			n, err := file.Read(buf)
 
 			// We are done!
-			if err == io.EOF {
+			if n == 0 || err == io.EOF {
 				if n == 0 {
 					result.MD5 = fmt.Sprintf(
 						"%x", result.md5.Sum(nil))
@@ -110,9 +130,9 @@ func (self *HashFunction) Call(ctx context.Context,
 				return vfilter.Null{}
 			}
 
-			result.md5.Write(buf[:n])
-			result.sha1.Write(buf[:n])
-			result.sha256.Write(buf[:n])
+			_, _ = result.md5.Write(buf[:n])
+			_, _ = result.sha1.Write(buf[:n])
+			_, _ = result.sha256.Write(buf[:n])
 
 			vfilter.ChargeOp(scope)
 		}

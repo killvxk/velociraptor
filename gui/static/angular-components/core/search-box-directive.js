@@ -4,6 +4,9 @@ goog.module('grrUi.core.searchBoxDirective');
 goog.module.declareLegacyNamespace();
 
 
+var ERROR_EVENT_NAME = 'ServerError';
+
+
 /**
  * Controller for SearchBoxDirective.
  *
@@ -16,33 +19,49 @@ goog.module.declareLegacyNamespace();
  */
 const SearchBoxController = function(
     $scope, $element, grrApiService, grrRoutingService) {
+    var self = this;
 
-  /** @private {!angular.Scope} */
-  this.scope_ = $scope;
+    /** @private {!angular.Scope} */
+    this.scope_ = $scope;
 
-  /** @private {!angular.jQuery} */
-  this.element_ = $element;
+    /** @private {!angular.jQuery} */
+    this.element_ = $element;
 
-  /** @private {!grrUi.core.apiService.ApiService} */
-  this.grrApiService_ = grrApiService;
+    /** @private {!grrUi.core.apiService.ApiService} */
+    this.grrApiService_ = grrApiService;
 
-  /** @private {!grrUi.routing.routingService.RoutingService} */
-  this.grrRoutingService_ = grrRoutingService;
+    /** @private {!grrUi.routing.routingService.RoutingService} */
+    this.grrRoutingService_ = grrRoutingService;
 
-  /** @export {string} */
-  this.query = '';
 
-  /** @export {Array} */
+    this.grrRoutingService_.uiOnParamsChanged(
+        this.scope_, ['q'], function(unused_newValues, opt_stateParams) {
+            self.query =  opt_stateParams["q"];
+        });
+
+    /** @export {string} */
+    this.query = '';
+
+    /** @export {Array} */
     this.labels = [];
 };
 
 /**
- * Updates GRR UI with current query value (using legacy API).
+ * Updates UI with current query value.
  *
  * @export
  */
-SearchBoxController.prototype.submitQuery = function() {
-    this.grrRoutingService_.go('search', {q: this.query});
+SearchBoxController.prototype.submitQuery = function(e) {
+    if (this.scope_["navigate"]) {
+        this.grrRoutingService_.go('search', {q: this.query});
+        return;
+    }
+
+    this.scope_["query"] = this.query;
+
+    e.preventDefault();
+    e.stopPropagation();
+    return false;
 };
 
 SearchBoxController.prototype.predict = function(viewValue) {
@@ -57,7 +76,6 @@ SearchBoxController.prototype.predict = function(viewValue) {
     this.grrApiService_.get(url, params).then(function (response) {
         self.labels = response.data.names;
     });
-
     return this.labels;
 };
 
@@ -68,12 +86,14 @@ SearchBoxController.prototype.predict = function(viewValue) {
  */
 exports.SearchBoxDirective = function() {
   return {
-    scope: {
-    },
-    restrict: 'E',
-    templateUrl: '/static/angular-components/core/search-box.html',
-    controller: SearchBoxController,
-    controllerAs: 'controller'
+      scope: {
+          query: "=",
+          navigate: "=",
+      },
+      restrict: 'E',
+      templateUrl: window.base_path+'/static/angular-components/core/search-box.html',
+      controller: SearchBoxController,
+      controllerAs: 'controller'
   };
 };
 

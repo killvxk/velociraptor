@@ -20,7 +20,7 @@
 
 We could not use that package directly because it only supports
 extracting the OLE data to a Go struct but we really need it in a
-vfilter.Dict().
+ordereddict.Dict().
 */
 
 package wmi
@@ -30,8 +30,10 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/Velocidex/ordereddict"
 	ole "github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
+	"www.velocidex.com/golang/velociraptor/acls"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
@@ -46,7 +48,7 @@ var (
 // S_FALSE is returned by CoInitializeEx if it was already called on this thread.
 const S_FALSE = 0x00000001
 
-func Query(query string, namespace string) ([]*vfilter.Dict, error) {
+func Query(query string, namespace string) ([]*ordereddict.Dict, error) {
 	lock.Lock()
 	defer lock.Unlock()
 	runtime.LockOSThread()
@@ -94,7 +96,7 @@ func Query(query string, namespace string) ([]*vfilter.Dict, error) {
 	wmi_result := resultRaw.ToIDispatch()
 	defer wmi_result.Release()
 
-	result := []*vfilter.Dict{}
+	result := []*ordereddict.Dict{}
 	properties := []string{}
 
 	err = oleutil.ForEach(wmi_result,
@@ -110,19 +112,28 @@ func Query(query string, namespace string) ([]*vfilter.Dict, error) {
 				properties = item_properties
 			}
 
-			row := vfilter.NewDict().SetCaseInsensitive()
+			row := ordereddict.NewDict().SetCaseInsensitive()
 			for _, property := range properties {
 				property_raw, err := item.GetProperty(property)
 				if err != nil {
 					row.Set(property, &vfilter.Null{})
 					continue
 				}
-				defer property_raw.Clear()
+				defer func() {
+					_ = property_raw.Clear()
+				}()
+
+				// If it is an array we convert it here.
+				if property_raw.VT&ole.VT_ARRAY > 0 {
+					row.Set(property, property_raw.ToArray().ToValueArray())
+					continue
+				}
 
 				switch property_raw.VT {
 				case ole.VT_UNKNOWN, ole.VT_DISPATCH:
 					// Do not set these because we
 					// cant do anything with them.
+
 				default:
 					row.Set(property, property_raw.Value())
 				}
@@ -140,7 +151,9 @@ func getProperties(item *ole.IDispatch) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer properties_raw.Clear()
+	defer func() {
+		_ = properties_raw.Clear()
+	}()
 
 	properties := properties_raw.ToIDispatch()
 	defer properties.Release()
@@ -154,7 +167,9 @@ func getProperties(item *ole.IDispatch) ([]string, error) {
 			if err != nil {
 				return err
 			}
-			defer name.Clear()
+			defer func() {
+				_ = name.Clear()
+			}()
 
 			value, ok := name.Value().(string)
 			if ok {
@@ -173,10 +188,17 @@ type WMIQueryArgs struct {
 }
 
 func runWMIQuery(scope *vfilter.Scope,
-	args *vfilter.Dict) []vfilter.Row {
+	args *ordereddict.Dict) []vfilter.Row {
 	var result []vfilter.Row
+
+	err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
+	if err != nil {
+		scope.Log("wmi: %s", err)
+		return result
+	}
+
 	arg := &WMIQueryArgs{}
-	err := vfilter.ExtractArgs(scope, args, arg)
+	err = vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
 		scope.Log("wmi: %s", err.Error())
 		return result

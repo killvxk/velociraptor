@@ -25,15 +25,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Velocidex/ordereddict"
 	humanize "github.com/dustin/go-humanize"
 	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
-	artifacts "www.velocidex.com/golang/velociraptor/artifacts"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/responder"
+	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/uploads"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
-	vql_networking "www.velocidex.com/golang/velociraptor/vql/networking"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -43,7 +44,7 @@ type LogWriter struct {
 }
 
 func (self *LogWriter) Write(b []byte) (int, error) {
-	logging.GetLogger(self.config_obj, &logging.FrontendComponent).Info(string(b))
+	logging.GetLogger(self.config_obj, &logging.ClientComponent).Info("%v", string(b))
 	self.responder.Log("%s", string(b))
 	return len(b), nil
 }
@@ -57,16 +58,18 @@ func (self VQLClientAction) StartQuery(
 	arg *actions_proto.VQLCollectorArgs) {
 
 	// Set reasonable defaults.
-	if arg.MaxWait == 0 {
-		arg.MaxWait = config_obj.Client.DefaultMaxWait
+	max_wait := arg.MaxWait
+	if max_wait == 0 {
+		max_wait = config_obj.Client.DefaultMaxWait
 
-		if arg.MaxWait == 0 {
-			arg.MaxWait = 100
+		if max_wait == 0 {
+			max_wait = 100
 		}
 	}
 
-	if arg.MaxRow == 0 {
-		arg.MaxRow = 10000
+	max_row := arg.MaxRow
+	if max_row == 0 {
+		max_row = 10000
 	}
 
 	rate := arg.OpsPerSecond
@@ -90,34 +93,46 @@ func (self VQLClientAction) StartQuery(
 		return
 	}
 
-	// Create a new query environment and store some useful
-	// objects in there. VQL plugins may then use the environment
-	// to communicate with the server.
-	uploader := &vql_networking.VelociraptorUploader{
+	// Clients do not have a copy of artifacts so they need to be
+	// sent all artifacts from the server.
+	manager, err := services.GetRepositoryManager()
+	if err != nil {
+		responder.RaiseError(fmt.Sprintf("%v", err))
+		return
+	}
+
+	repository := manager.NewRepository()
+	for _, artifact := range arg.Artifacts {
+		_, err := repository.LoadProto(artifact, false /* validate */)
+		if err != nil {
+			responder.RaiseError(fmt.Sprintf(
+				"Failed to compile artifact %v.", artifact.Name))
+			return
+		}
+	}
+
+	uploader := &uploads.VelociraptorUploader{
 		Responder: responder,
 	}
 
-	env := vfilter.NewDict().
-		Set("$responder", responder).
-		Set("$uploader", uploader).
-		Set("config", config_obj.Client).
-		Set(vql_subsystem.CACHE_VAR, vql_subsystem.NewScopeCache())
+	builder := services.ScopeBuilder{
+		Config: config_obj,
+		// Disable ACLs on the client.
+		ACLManager: vql_subsystem.NullACLManager{},
+		Env:        ordereddict.NewDict(),
+		Uploader:   uploader,
+		Repository: repository,
+		Logger:     log.New(&LogWriter{config_obj, responder}, "vql: ", 0),
+	}
 
 	for _, env_spec := range arg.Env {
-		env.Set(env_spec.Key, env_spec.Value)
+		builder.Env.Set(env_spec.Key, env_spec.Value)
 	}
 
-	// Clients do not have a copy of artifacts so they need to be
-	// sent all artifacts from the server.
-	repository := artifacts.NewRepository()
-	for _, artifact := range arg.Artifacts {
-		repository.Set(artifact)
-	}
-	scope := artifacts.MakeScope(repository).AppendVars(env)
+	scope := manager.BuildScope(builder)
 	defer scope.Close()
 
-	scope.Logger = log.New(&LogWriter{config_obj, responder},
-		"vql: ", log.Lshortfile)
+	scope.Log("Starting query execution.")
 
 	vfilter.InstallThrottler(scope, vfilter.NewTimeThrottler(float64(rate)))
 
@@ -143,7 +158,10 @@ func (self VQLClientAction) StartQuery(
 		}
 
 		result_chan := vfilter.GetResponseChannel(
-			vql, sub_ctx, scope, int(arg.MaxRow), int(arg.MaxWait))
+			vql, sub_ctx, scope,
+			vql_subsystem.MarshalJsonl(scope),
+			int(max_row),
+			int(max_wait))
 	run_query:
 		for {
 			select {
@@ -175,11 +193,12 @@ func (self VQLClientAction) StartQuery(
 					continue
 				}
 				response := &actions_proto.VQLResponse{
-					Query:     query,
-					QueryId:   uint64(query_idx),
-					Part:      uint64(result.Part),
-					Response:  string(result.Payload),
-					Timestamp: uint64(time.Now().UTC().UnixNano() / 1000),
+					Query:         query,
+					QueryId:       uint64(query_idx),
+					Part:          uint64(result.Part),
+					JSONLResponse: string(result.Payload),
+					TotalRows:     uint64(result.TotalRows),
+					Timestamp:     uint64(time.Now().UTC().UnixNano() / 1000),
 				}
 				// Don't log empty VQL statements.
 				if query.Name != "" {

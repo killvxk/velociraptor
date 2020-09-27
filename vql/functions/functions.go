@@ -27,6 +27,8 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
@@ -40,7 +42,7 @@ type _Base64Decode struct{}
 func (self _Base64Decode) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &_Base64DecodeArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -71,7 +73,7 @@ type _Base64Encode struct{}
 func (self _Base64Encode) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &_Base64EncodeArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -100,7 +102,7 @@ type _ToLower struct{}
 func (self _ToLower) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &_ToLowerArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -123,7 +125,7 @@ type _ToUpper struct{}
 func (self _ToUpper) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &_ToLowerArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -142,7 +144,7 @@ func (self _ToUpper) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfil
 }
 
 type _ToIntArgs struct {
-	String string `vfilter:"required,field=string,doc=A string to convert to int"`
+	String vfilter.Any `vfilter:"required,field=string,doc=A string to convert to int"`
 }
 
 type _ToInt struct{}
@@ -150,7 +152,7 @@ type _ToInt struct{}
 func (self _ToInt) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &_ToIntArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -158,8 +160,15 @@ func (self _ToInt) Call(
 		return vfilter.Null{}
 	}
 
-	result, _ := strconv.Atoi(arg.String)
-	return result
+	switch t := arg.String.(type) {
+	case string:
+		result, _ := strconv.ParseInt(t, 0, 64)
+		return result
+
+	default:
+		in, _ := utils.ToInt64(arg.String)
+		return in
+	}
 }
 
 func (self _ToInt) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
@@ -175,7 +184,7 @@ type _ParseFloat struct{}
 func (self _ParseFloat) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &_ToIntArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -183,8 +192,27 @@ func (self _ParseFloat) Call(
 		return vfilter.Null{}
 	}
 
-	result, _ := strconv.ParseFloat(arg.String, 64)
-	return result
+	switch t := arg.String.(type) {
+	case string:
+		result, _ := strconv.ParseFloat(t, 64)
+		return result
+
+	case float64:
+		return t
+
+	case *float64:
+		return *t
+
+	case float32:
+		return t
+
+	case *float32:
+		return *t
+
+	default:
+		in, _ := utils.ToInt64(arg.String)
+		return in
+	}
 }
 
 func (self _ParseFloat) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
@@ -200,7 +228,7 @@ type _Now struct{}
 func (self _Now) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	return time.Now().Unix()
 }
 
@@ -217,7 +245,7 @@ type _UTF16 struct{}
 func (self _UTF16) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 
 	arg := &_Base64DecodeArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
@@ -243,12 +271,45 @@ func (self _UTF16) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilte
 	}
 }
 
+type _UTF16Encode struct{}
+
+func (self _UTF16Encode) Call(
+	ctx context.Context,
+	scope *vfilter.Scope,
+	args *ordereddict.Dict) vfilter.Any {
+
+	arg := &_Base64EncodeArgs{}
+	err := vfilter.ExtractArgs(scope, args, arg)
+	if err != nil {
+		scope.Log("utf16_encode: %s", err.Error())
+		return vfilter.Null{}
+	}
+
+	buf := bytes.NewBuffer(nil)
+	ints := utf16.Encode([]rune(arg.String))
+	err = binary.Write(buf, binary.LittleEndian, &ints)
+	if err != nil {
+		scope.Log("utf16_encode: %s", err.Error())
+		return vfilter.Null{}
+	}
+
+	return buf.String()
+}
+
+func (self _UTF16Encode) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+	return &vfilter.FunctionInfo{
+		Name:    "utf16_encode",
+		Doc:     "Encode a string to utf16 bytes.",
+		ArgType: type_map.AddType(scope, &_Base64DecodeArgs{}),
+	}
+}
+
 type _Scope struct{}
 
 func (self _Scope) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 
 	return scope
 }
@@ -258,6 +319,68 @@ func (self _Scope) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilte
 		Name: "scope",
 		Doc:  "return the scope.",
 	}
+}
+
+type _GetFunctionArgs struct {
+	Item    vfilter.Any `vfilter:"optional,field=item"`
+	Member  string      `vfilter:"optional,field=member"`
+	Field   vfilter.Any `vfilter:"optional,field=field"`
+	Default vfilter.Any `vfilter:"optional,field=default"`
+}
+
+type _GetFunction struct{}
+
+func (self _GetFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+	return &vfilter.FunctionInfo{
+		Name:    "get",
+		Doc:     "Gets the member field from item.",
+		ArgType: type_map.AddType(scope, _GetFunctionArgs{}),
+	}
+}
+
+func (self _GetFunction) Call(
+	ctx context.Context,
+	scope *vfilter.Scope,
+	args *ordereddict.Dict) vfilter.Any {
+	arg := &_GetFunctionArgs{}
+	err := vfilter.ExtractArgs(scope, args, arg)
+	if err != nil {
+		scope.Log("get: %s", err.Error())
+		return vfilter.Null{}
+	}
+
+	if arg.Default == nil {
+		arg.Default = vfilter.Null{}
+	}
+
+	result := arg.Item
+	if result == nil {
+		result = scope
+	}
+
+	var pres bool
+
+	if arg.Field == nil && arg.Member == "" {
+		scope.Log("get: either Field or Member should be specified.")
+		return vfilter.Null{}
+	}
+
+	if arg.Field != nil {
+		result, pres = scope.Associative(result, arg.Field)
+		if !pres {
+			return arg.Default
+		}
+		return result
+	}
+
+	for _, member := range strings.Split(arg.Member, ".") {
+		result, pres = scope.Associative(result, member)
+		if !pres {
+			return arg.Default
+		}
+	}
+
+	return result
 }
 
 func init() {
@@ -270,4 +393,6 @@ func init() {
 	vql_subsystem.RegisterFunction(&_ToLower{})
 	vql_subsystem.RegisterFunction(&_ToUpper{})
 	vql_subsystem.RegisterFunction(&_UTF16{})
+	vql_subsystem.RegisterFunction(&_UTF16Encode{})
+	vql_subsystem.RegisterFunction(&_GetFunction{})
 }

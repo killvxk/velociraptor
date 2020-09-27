@@ -1,4 +1,4 @@
-// +build windows
+// +build disabled
 
 /*
 A fuse implementation using cgofuse and WinFSp.
@@ -30,7 +30,7 @@ import (
 	"time"
 
 	"github.com/Velocidex/cgofuse/fuse"
-	"github.com/golang/protobuf/ptypes"
+	kingpin "gopkg.in/alecthomas/kingpin.v2"
 	"www.velocidex.com/golang/velociraptor/api"
 	api_proto "www.velocidex.com/golang/velociraptor/api/proto"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
@@ -139,24 +139,19 @@ func (self *VFSFs) Read(file_path string, buff []byte, off int64, fd uint64) (n 
 	}
 
 	// We need to fetch the file from the client.
+	ctx := context.Background()
 	self.logger.Info("Fetching file %v", vfs_name)
-
-	channel := grpc_client.GetChannel(self.config_obj)
-	defer channel.Close()
-
-	client := api_proto.NewAPIClient(channel)
-	flow_runner_args := &flows_proto.FlowRunnerArgs{
-		ClientId: self.client_id,
-		FlowName: "VFSDownloadFile",
+	client, closer, err := grpc_client.Factory.GetAPIClient(ctx, self.config_obj)
+	if err != nil {
+		self.logger.Err("Fetching Error %s: %v", vfs_name, err)
+		return -fuse.EIO
 	}
+	defer closer()
 
-	flow_args, err := ptypes.MarshalAny(&flows_proto.VFSDownloadFileRequest{
-		ClientId: self.client_id,
-		VfsPath:  []string{"/" + vfs_name},
-	})
-	flow_runner_args.Args = flow_args
-
-	response, err := client.LaunchFlow(context.Background(), flow_runner_args)
+	client_path, accessor := api.GetClientPath(vfs_name)
+	response, err := client.CollectArtifact(context.Background(),
+		api.MakeCollectorRequest(self.client_id, "System.VFS.DownloadFile",
+			"Path", client_path, "Accessor", accessor))
 	if err != nil {
 		self.logger.Err("Fetching Error %s: %v", vfs_name, err)
 		return -fuse.EIO
@@ -182,10 +177,15 @@ func (self *VFSFs) Read(file_path string, buff []byte, off int64, fd uint64) (n 
 }
 
 func (self *VFSFs) read_buffer(vfs_name string, buff []byte, off int64, fh uint64) (n int) {
-	channel := grpc_client.GetChannel(self.config_obj)
-	defer channel.Close()
+	ctx := context.Background()
+	client, closer, err := grpc_client.Factory.GetAPIClient(ctx, self.config_obj)
+	if err != nil {
+		self.logger.Err("Fetching Error %s: %v", vfs_name, err)
+		return -fuse.EIO
+	}
 
-	client := api_proto.NewAPIClient(channel)
+	defer closer()
+
 	response, err := client.VFSGetBuffer(context.Background(),
 		&api_proto.VFSFileBuffer{
 			ClientId: self.client_id,
@@ -194,7 +194,7 @@ func (self *VFSFs) read_buffer(vfs_name string, buff []byte, off int64, fh uint6
 			Length:   uint32(len(buff)),
 		})
 	if err != nil {
-		self.logger.Error("Read ", vfs_name, err)
+		self.logger.Error("Read: %v %v ", vfs_name, err)
 		return -fuse.ENOENT
 	}
 
@@ -218,13 +218,13 @@ func (self *VFSFs) Readdir(path string,
 	vfs_name := fsPathToVFS(path)
 	rows, err := self.GetDir(vfs_name)
 	if err < 0 {
-		self.logger.Error(fmt.Sprintf("Readdir %s: %v", path, err))
+		self.logger.Error("Readdir %s: %v", path, err)
 		return err
 	}
 
 	names := make([]string, len(rows))
 	for _, row := range rows {
-		if utils.InString(&names, row.Name) {
+		if utils.InString(names, row.Name) {
 			continue
 		}
 		names = append(names, row.Name)
@@ -242,27 +242,29 @@ func newStatF(row *api.FileInfoRow) *fuse.Stat_t {
 		mode = uint32(00777 | fuse.S_IFDIR)
 	}
 
-	if row.Mtime.Unix() < 0 {
-		row.Mtime = time.Unix(0, 0)
-	}
+	/*
+		if row.Mtime.Unix() < 0 {
+			row.Mtime = time.Unix(0, 0)
+		}
 
-	if row.Atime.Unix() < 0 {
-		row.Atime = time.Unix(0, 0)
-	}
+		if row.Atime.Unix() < 0 {
+			row.Atime = time.Unix(0, 0)
+		}
 
-	if row.Ctime.Unix() < 0 {
-		row.Ctime = time.Unix(0, 0)
-	}
-
+		if row.Ctime.Unix() < 0 {
+			row.Ctime = time.Unix(0, 0)
+		}
+	*/
 	result := &fuse.Stat_t{
-
-		Mode:     mode,
-		Nlink:    1,
-		Size:     row.Size,
-		Mtim:     fuse.NewTimespec(row.Mtime),
-		Atim:     fuse.NewTimespec(row.Atime),
-		Ctim:     fuse.NewTimespec(row.Ctime),
-		Birthtim: fuse.NewTimespec(row.Ctime),
+		Mode:  mode,
+		Nlink: 1,
+		Size:  row.Size,
+		/*
+			Mtim:     fuse.NewTimespec(row.Mtime),
+			Atim:     fuse.NewTimespec(row.Atime),
+			Ctim:     fuse.NewTimespec(row.Ctime),
+			Birthtim: fuse.NewTimespec(row.Ctime),
+		*/
 	}
 
 	return result
@@ -282,10 +284,15 @@ func (self *VFSFs) GetDir(vfs_name string) ([]*api.FileInfoRow, int) {
 	}
 
 	// Not there - initiate a new client flow.
-	channel := grpc_client.GetChannel(self.config_obj)
-	defer channel.Close()
+	ctx := context.Background()
+	client, closer, err := grpc_client.Factory.GetAPIClient(ctx, self.config_obj)
+	if err != nil {
+		self.logger.Err("Fetching Error %s: %v", vfs_name, err)
+		return nil, -fuse.EIO
+	}
 
-	client := api_proto.NewAPIClient(channel)
+	defer closer()
+
 	response, err := client.VFSRefreshDirectory(context.Background(),
 		&api_proto.VFSRefreshDirectoryRequest{
 			ClientId: self.client_id,
@@ -325,14 +332,19 @@ func (self *VFSFs) GetDir(vfs_name string) ([]*api.FileInfoRow, int) {
 
 func (self *VFSFs) isFlowComplete(flow_id, vfs_name string) (bool, int) {
 	// Check if the flow is completed yet.
-	channel := grpc_client.GetChannel(self.config_obj)
-	defer channel.Close()
+	ctx := context.Background()
+	client, closer, err := grpc_client.Factory.GetAPIClient(ctx, self.config_obj)
+	if err != nil {
+		self.logger.Err("Fetching Error %s: %v", vfs_name, err)
+		return false, -fuse.EIO
+	}
+
+	defer closer()
 
 	req := &api_proto.ApiFlowRequest{
 		ClientId: self.client_id,
 		FlowId:   flow_id,
 	}
-	client := api_proto.NewAPIClient(channel)
 	response, err := client.GetFlowDetails(context.Background(), req)
 	if err != nil {
 		self.logger.Warn("GetFlowDetails %s: %v", vfs_name, err)
@@ -340,22 +352,26 @@ func (self *VFSFs) isFlowComplete(flow_id, vfs_name string) (bool, int) {
 	}
 
 	// Not ready yet - try again later.
-	if response.Context.State == flows_proto.FlowContext_RUNNING {
+	if response.Context.State == flows_proto.ArtifactCollectorContext_RUNNING {
 		return false, 0
 	}
 	return true, 0
 }
 
 func (self *VFSFs) getDir(vfs_name string) ([]*api.FileInfoRow, error) {
-	channel := grpc_client.GetChannel(self.config_obj)
-	defer channel.Close()
+	ctx := context.Background()
+	client, closer, err := grpc_client.Factory.GetAPIClient(ctx, self.config_obj)
+	if err != nil {
+		self.logger.Err("Fetching Error %s: %v", vfs_name, err)
+		return nil, err
+	}
+
+	defer closer()
 
 	request := &flows_proto.VFSListRequest{
 		ClientId: self.client_id,
 		VfsPath:  vfs_name,
 	}
-
-	client := api_proto.NewAPIClient(channel)
 	response, err := client.VFSListDirectory(context.Background(), request)
 	if err != nil {
 		self.logger.Warn("VFSListDirectory error %s (%v)", vfs_name, err)
@@ -408,9 +424,15 @@ func NewVFSFs(config_obj *config_proto.Config, client_id string) *VFSFs {
 }
 
 func doFuse() {
-	config_obj := get_config_or_default()
+	config_obj, err := APIConfigLoader.LoadAndValidate()
+	kingpin.FatalIfError(err, "Unable to load config file")
 
-	grpc_client.GetChannel(config_obj)
+	// Connect one time to make sure we can.
+	ctx := context.Background()
+	_, closer, err := grpc_client.Factory.GetAPIClient(ctx, config_obj)
+	kingpin.FatalIfError(err, "Unable to get grpc client")
+
+	closer()
 
 	args := []string{*fuse_command_mnt_point,
 		// Winfsp uses very few threads (2) which may cause a

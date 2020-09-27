@@ -23,7 +23,9 @@
 package vql
 
 import (
+	"github.com/Velocidex/ordereddict"
 	"github.com/shirou/gopsutil/process"
+	"www.velocidex.com/golang/velociraptor/acls"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -46,7 +48,7 @@ func (self _ProcessFieldImpl) Associative(
 	scope *vfilter.Scope, a vfilter.Any, b vfilter.Any) (vfilter.Any, bool) {
 	field := b.(string)
 
-	if utils.InString(&_BlockedMembers, field) {
+	if utils.InString(_BlockedMembers, field) {
 		return false, true
 	}
 
@@ -57,7 +59,7 @@ func (self _ProcessFieldImpl) Associative(
 func (self _ProcessFieldImpl) GetMembers(scope *vfilter.Scope, a vfilter.Any) []string {
 	var result []string
 	for _, item := range (vfilter.DefaultAssociative{}).GetMembers(scope, a) {
-		if !utils.InString(&_BlockedMembers, item) {
+		if !utils.InString(_BlockedMembers, item) {
 			result = append(result, item)
 		}
 	}
@@ -70,41 +72,46 @@ type PslistArgs struct {
 }
 
 func init() {
-	exportedProtocolImpl = append(exportedProtocolImpl, &_ProcessFieldImpl{})
-	exportedPlugins = append(exportedPlugins,
-		vfilter.GenericListPlugin{
-			PluginName: "pslist",
-			Function: func(
-				scope *vfilter.Scope,
-				args *vfilter.Dict) []vfilter.Row {
-				var result []vfilter.Row
+	RegisterProtocol(&_ProcessFieldImpl{})
+	RegisterPlugin(vfilter.GenericListPlugin{
+		PluginName: "pslist",
+		Function: func(
+			scope *vfilter.Scope,
+			args *ordereddict.Dict) []vfilter.Row {
+			var result []vfilter.Row
 
-				arg := &PslistArgs{}
-				err := vfilter.ExtractArgs(scope, args, arg)
-				if err != nil {
-					scope.Log("pslist: %s", err.Error())
-					return result
-				}
+			err := CheckAccess(scope, acls.MACHINE_STATE)
+			if err != nil {
+				scope.Log("pslist: %s", err)
+				return result
+			}
 
-				// If the user asked for one process
-				// just return that one.
-				if arg.Pid != 0 {
-					process_obj, err := process.NewProcess(int32(arg.Pid))
-					if err == nil {
-						result = append(result, process_obj)
-					}
-					return result
-				}
+			arg := &PslistArgs{}
+			err = vfilter.ExtractArgs(scope, args, arg)
+			if err != nil {
+				scope.Log("pslist: %s", err.Error())
+				return result
+			}
 
-				processes, err := process.Processes()
+			// If the user asked for one process
+			// just return that one.
+			if arg.Pid != 0 {
+				process_obj, err := process.NewProcess(int32(arg.Pid))
 				if err == nil {
-					for _, item := range processes {
-						result = append(result, item)
-					}
+					result = append(result, process_obj)
 				}
 				return result
-			},
-			RowType: &process.Process{},
-			Doc:     "List processes",
-		})
+			}
+
+			processes, err := process.Processes()
+			if err == nil {
+				for _, item := range processes {
+					result = append(result, item)
+				}
+			}
+			return result
+		},
+		ArgType: &PslistArgs{},
+		Doc:     "List processes",
+	})
 }

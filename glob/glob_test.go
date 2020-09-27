@@ -19,20 +19,22 @@ package glob
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path"
 	"reflect"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
-	"time"
+
+	"www.velocidex.com/golang/velociraptor/json"
 
 	"github.com/sebdah/goldie"
+	"www.velocidex.com/golang/velociraptor/config"
 	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vtesting"
+	"www.velocidex.com/golang/vfilter"
 )
 
 type pathComponentsTestFixtureType struct {
@@ -97,28 +99,9 @@ func TestFnMatchTranslate(t *testing.T) {
 	}
 }
 
-type MockFileInfo struct {
-	name      string
-	full_path string
-}
-
-func (self MockFileInfo) Data() interface{}        { return nil }
-func (self MockFileInfo) Name() string             { return self.name }
-func (self MockFileInfo) Size() int64              { return 0 }
-func (self MockFileInfo) Mode() os.FileMode        { return os.ModePerm }
-func (self MockFileInfo) ModTime() time.Time       { return time.Time{} }
-func (self MockFileInfo) IsDir() bool              { return true }
-func (self MockFileInfo) Sys() interface{}         { return nil }
-func (self MockFileInfo) FullPath() string         { return self.full_path }
-func (self MockFileInfo) Mtime() TimeVal           { return TimeVal{} }
-func (self MockFileInfo) Atime() TimeVal           { return TimeVal{} }
-func (self MockFileInfo) Ctime() TimeVal           { return TimeVal{} }
-func (self MockFileInfo) IsLink() bool             { return false }
-func (self MockFileInfo) GetLink() (string, error) { return "", nil }
-
 type MockFileSystemAccessor []string
 
-func (self MockFileSystemAccessor) New(ctx context.Context) FileSystemAccessor {
+func (self MockFileSystemAccessor) New(scope *vfilter.Scope) FileSystemAccessor {
 	return self
 }
 
@@ -137,7 +120,7 @@ func (self MockFileSystemAccessor) ReadDir(filepath string) ([]FileInfo, error) 
 		if strings.HasPrefix(mock_path, subpath) {
 			suffix := mock_path[len(subpath):]
 			mock_path_components := strings.Split(suffix, "/")
-			if !utils.InString(&seen, mock_path_components[0]) {
+			if !utils.InString(seen, mock_path_components[0]) {
 				seen = append(seen, mock_path_components[0])
 			}
 		}
@@ -145,9 +128,9 @@ func (self MockFileSystemAccessor) ReadDir(filepath string) ([]FileInfo, error) 
 
 	var result []FileInfo
 	for _, k := range seen {
-		result = append(result, MockFileInfo{
-			name:      k,
-			full_path: path.Join(subpath, k),
+		result = append(result, vtesting.MockFileInfo{
+			Name_:     k,
+			FullPath_: path.Join(subpath, k),
 		})
 	}
 	return result, nil
@@ -228,7 +211,8 @@ func TestGlobWithContext(t *testing.T) {
 		}
 
 		output_chan := globber.ExpandWithContext(
-			ctx, "/", fs_accessor)
+			ctx, config.GetDefaultConfig(),
+			"/", fs_accessor)
 		for row := range output_chan {
 			returned = append(returned, row.FullPath())
 		}
@@ -236,7 +220,7 @@ func TestGlobWithContext(t *testing.T) {
 		result[fmt.Sprintf("%03d %s", idx, fixture.name)] = returned
 	}
 
-	result_json, _ := json.MarshalIndent(result, "", " ")
+	result_json, _ := json.MarshalIndent(result)
 	goldie.Assert(t, "TestGlobWithContext", result_json)
 }
 

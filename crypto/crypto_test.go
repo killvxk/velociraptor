@@ -30,6 +30,7 @@ import (
 	"www.velocidex.com/golang/velociraptor/config"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 type TestSuite struct {
@@ -42,8 +43,10 @@ type TestSuite struct {
 
 func (self *TestSuite) SetupTest() {
 	t := self.T()
-	config_obj, err := config.LoadClientConfig(
-		"../http_comms/test_data/server.config.yaml")
+	config_obj, err := new(config.Loader).WithFileLoader(
+		"../http_comms/test_data/server.config.yaml").
+		WithRequiredFrontend().WithWriteback().
+		LoadAndValidate()
 	require.NoError(t, err)
 
 	self.config_obj = config_obj
@@ -87,7 +90,9 @@ func (self *TestSuite) TestEncDecServerToClient() {
 	assert.NoError(t, err)
 
 	cipher_text, err := self.server_manager.Encrypt(
-		[][]byte{serialized}, self.client_id)
+		[][]byte{serialized},
+		crypto_proto.PackedMessageList_ZCOMPRESSION,
+		self.client_id)
 	assert.NoError(t, err)
 
 	initial_c := testutil.ToFloat64(rsaDecryptCounter)
@@ -99,7 +104,7 @@ func (self *TestSuite) TestEncDecServerToClient() {
 			t.Fatal(err)
 		}
 		message_info.IterateJobs(context.Background(),
-			func(item *crypto_proto.GrrMessage) {
+			func(ctx context.Context, item *crypto_proto.GrrMessage) {
 				assert.Equal(t, item.Name, "OMG it's a string")
 				assert.Equal(t, item.AuthState, crypto_proto.GrrMessage_AUTHENTICATED)
 			})
@@ -122,7 +127,9 @@ func (self *TestSuite) TestEncDecClientToServer() {
 
 	config_obj := config.GetDefaultConfig()
 	cipher_text, err := self.client_manager.EncryptMessageList(
-		message_list, config_obj.Client.PinnedServerName)
+		message_list,
+		crypto_proto.PackedMessageList_ZCOMPRESSION,
+		config_obj.Client.PinnedServerName)
 	assert.NoError(t, err)
 
 	initial_c := testutil.ToFloat64(rsaDecryptCounter)
@@ -135,7 +142,7 @@ func (self *TestSuite) TestEncDecClientToServer() {
 		}
 
 		message_info.IterateJobs(context.Background(),
-			func(item *crypto_proto.GrrMessage) {
+			func(ctx context.Context, item *crypto_proto.GrrMessage) {
 				assert.Equal(t, item.Name, "OMG it's a string")
 				assert.Equal(
 					t, item.AuthState, crypto_proto.GrrMessage_AUTHENTICATED)
@@ -155,8 +162,12 @@ func (self *TestSuite) TestEncryption() {
 	config_obj := config.GetDefaultConfig()
 	initial_c := testutil.ToFloat64(rsaDecryptCounter)
 	for i := 0; i < 100; i++ {
+		compressed, err := utils.Compress(plain_text)
+		assert.NoError(t, err)
+
 		cipher_text, err := self.client_manager.Encrypt(
-			[][]byte{Compress(plain_text)},
+			[][]byte{compressed},
+			crypto_proto.PackedMessageList_ZCOMPRESSION,
 			config_obj.Client.PinnedServerName)
 		assert.NoError(t, err)
 
@@ -165,7 +176,8 @@ func (self *TestSuite) TestEncryption() {
 
 		assert.Equal(t, self.client_id, result.Source)
 		assert.Equal(t, result.Authenticated, true)
-		assert.Equal(t, result.RawCompressed[0], Compress(plain_text))
+
+		assert.Equal(t, result.RawCompressed[0], compressed)
 	}
 
 	// We should encrypt this only once since we cache the cipher in the output LRU.

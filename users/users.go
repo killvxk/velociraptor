@@ -31,42 +31,40 @@ import (
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	constants "www.velocidex.com/golang/velociraptor/constants"
 	datastore "www.velocidex.com/golang/velociraptor/datastore"
+	"www.velocidex.com/golang/velociraptor/paths"
 )
 
-type UserRecord struct {
-	*api_proto.VelociraptorUser
-}
+const (
+	// Default settings for reasonable GUI
+	default_user_options = `{"selectionStyle":"line","highlightActiveLine":true,"highlightSelectedWord":true,"copyWithEmptySelection":false,"cursorStyle":"ace","mergeUndoDeltas":true,"behavioursEnabled":true,"wrapBehavioursEnabled":true,"showLineNumbers":true,"relativeLineNumbers":true,"hScrollBarAlwaysVisible":false,"vScrollBarAlwaysVisible":false,"highlightGutterLine":true,"animatedScroll":false,"showInvisibles":false,"showPrintMargin":true,"printMarginColumn":80,"printMargin":80,"fadeFoldWidgets":false,"showFoldWidgets":true,"displayIndentGuides":true,"showGutter":true,"fontSize":12,"fontFamily":"monospace","scrollPastEnd":0,"theme":"ace/theme/xcode","useTextareaForIME":true,"scrollSpeed":2,"dragDelay":0,"dragEnabled":true,"focusTimeout":0,"tooltipFollowsMouse":true,"firstLineNumber":1,"overwrite":false,"newLineMode":"auto","useSoftTabs":true,"navigateWithinSoftTabs":false,"tabSize":4,"wrap":"free","indentedSoftWrap":true,"foldStyle":"markbegin","enableMultiselect":true,"enableBlockSelect":true,"enableEmmet":true,"enableBasicAutocompletion":true,"enableLiveAutocompletion":true}`
+)
 
-func NewUserRecord(name string) (*UserRecord, error) {
-	if !regexp.MustCompile("^[a-zA-Z0-9@.-]+$").MatchString(name) {
+func NewUserRecord(name string) (*api_proto.VelociraptorUser, error) {
+	if !regexp.MustCompile("^[a-zA-Z0-9@.-_]+$").MatchString(name) {
 		return nil, errors.New(fmt.Sprintf(
 			"Unacceptable username %v", name))
 	}
-	return &UserRecord{&api_proto.VelociraptorUser{Name: name}}, nil
+	return &api_proto.VelociraptorUser{Name: name}, nil
 }
 
-func (self *UserRecord) SetPassword(password string) *UserRecord {
+func SetPassword(user_record *api_proto.VelociraptorUser, password string) {
 	salt := make([]byte, 32)
-	rand.Read(salt)
-
+	_, err := rand.Read(salt)
+	if err != nil {
+		return
+	}
 	hash := sha256.Sum256(append(salt, []byte(password)...))
-	self.PasswordSalt = salt[:]
-	self.PasswordHash = hash[:]
-	self.Locked = false
-	return self
+	user_record.PasswordSalt = salt[:]
+	user_record.PasswordHash = hash[:]
+	user_record.Locked = false
 }
 
-func (self *UserRecord) Lock() *UserRecord {
-	self.Locked = true
-	return self
-}
-
-func (self *UserRecord) VerifyPassword(password string) bool {
+func VerifyPassword(self *api_proto.VelociraptorUser, password string) bool {
 	hash := sha256.Sum256(append(self.PasswordSalt, []byte(password)...))
 	return subtle.ConstantTimeCompare(hash[:], self.PasswordHash) == 1
 }
 
-func SetUser(config_obj *config_proto.Config, user_record *UserRecord) error {
+func SetUser(config_obj *config_proto.Config, user_record *api_proto.VelociraptorUser) error {
 	if user_record.Name == "" {
 		return errors.New("Must set a username")
 	}
@@ -74,11 +72,13 @@ func SetUser(config_obj *config_proto.Config, user_record *UserRecord) error {
 	if err != nil {
 		return err
 	}
+
 	return db.SetSubject(config_obj,
-		constants.USER_URN+user_record.Name, user_record)
+		paths.UserPathManager{Name: user_record.Name}.Path(),
+		user_record)
 }
 
-func ListUsers(config_obj *config_proto.Config) ([]*UserRecord, error) {
+func ListUsers(config_obj *config_proto.Config) ([]*api_proto.VelociraptorUser, error) {
 	db, err := datastore.GetDB(config_obj)
 	if err != nil {
 		return nil, err
@@ -89,16 +89,10 @@ func ListUsers(config_obj *config_proto.Config) ([]*UserRecord, error) {
 		return nil, err
 	}
 
-	result := make([]*UserRecord, 0, len(children))
+	result := make([]*api_proto.VelociraptorUser, 0, len(children))
 	for _, child := range children {
 		username := path.Base(child)
-		user_record, err := NewUserRecord(username)
-		if err != nil {
-			return nil, err
-		}
-
-		err = db.GetSubject(config_obj,
-			constants.USER_URN+username, user_record)
+		user_record, err := GetUser(config_obj, username)
 		if err == nil {
 			result = append(result, user_record)
 		}
@@ -107,7 +101,25 @@ func ListUsers(config_obj *config_proto.Config) ([]*UserRecord, error) {
 	return result, nil
 }
 
-func GetUser(config_obj *config_proto.Config, username string) (*UserRecord, error) {
+// Returns the user record after stripping sensitive information like
+// password hashes.
+func GetUser(config_obj *config_proto.Config, username string) (
+	*api_proto.VelociraptorUser, error) {
+	result, err := GetUserWithHashes(config_obj, username)
+	if err != nil {
+		return nil, err
+	}
+
+	// Do not divulge the password and hashes.
+	result.PasswordHash = nil
+	result.PasswordSalt = nil
+
+	return result, nil
+}
+
+// Return the user record with hashes - only used in Basic Auth.
+func GetUserWithHashes(config_obj *config_proto.Config, username string) (
+	*api_proto.VelociraptorUser, error) {
 	if username == "" {
 		return nil, errors.New("Must set a username")
 	}
@@ -115,13 +127,16 @@ func GetUser(config_obj *config_proto.Config, username string) (*UserRecord, err
 	if err != nil {
 		return nil, err
 	}
-	user_record, err := NewUserRecord(username)
-	if err != nil {
-		return nil, err
-	}
-	return user_record, db.GetSubject(config_obj,
-		constants.USER_URN+username, user_record)
 
+	user_record := &api_proto.VelociraptorUser{}
+	err = db.GetSubject(config_obj,
+		paths.UserPathManager{Name: username}.Path(), user_record)
+
+	if user_record.Name == "" {
+		return nil, errors.New("User not found")
+	}
+
+	return user_record, err
 }
 
 func GetUserNotificationCount(config_obj *config_proto.Config, username string) (uint64, error) {
@@ -190,10 +205,16 @@ func GetUserNotifications(config_obj *config_proto.Config, username string, clea
 
 	if len(to_clear) > 0 {
 		for urn, item := range to_clear {
-			db.DeleteSubject(config_obj, urn)
+			err = db.DeleteSubject(config_obj, urn)
+			if err != nil {
+				return nil, err
+			}
 			new_urn := strings.Replace(urn, "pending", "read", -1)
 			item.State = api_proto.UserNotification_STATE_NOT_PENDING
-			db.SetSubject(config_obj, new_urn, item)
+			err = db.SetSubject(config_obj, new_urn, item)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 	}
@@ -206,8 +227,38 @@ func Notify(config_obj *config_proto.Config, notification *api_proto.UserNotific
 	defer mu.Unlock()
 
 	if gUserNotificationManager == nil {
-		return errors.New("Uninitiaalized UserNotificationManager")
+		return errors.New("Uninitialized UserNotificationManager")
 	}
 	gUserNotificationManager.Notify(notification)
 	return nil
+}
+
+func SetUserOptions(config_obj *config_proto.Config,
+	username string,
+	options *api_proto.SetGUIOptionsRequest) error {
+
+	path_manager := paths.UserPathManager{Name: username}
+	db, err := datastore.GetDB(config_obj)
+	if err != nil {
+		return err
+	}
+
+	return db.SetSubject(config_obj, path_manager.GUIOptions(), options)
+}
+
+func GetUserOptions(config_obj *config_proto.Config, username string) (
+	*api_proto.SetGUIOptionsRequest, error) {
+
+	path_manager := paths.UserPathManager{Name: username}
+	db, err := datastore.GetDB(config_obj)
+	if err != nil {
+		return nil, err
+	}
+
+	options := &api_proto.SetGUIOptionsRequest{}
+	err = db.GetSubject(config_obj, path_manager.GUIOptions(), options)
+	if options.Options == "" {
+		options.Options = default_user_options
+	}
+	return options, err
 }

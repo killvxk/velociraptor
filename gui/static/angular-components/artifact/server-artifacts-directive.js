@@ -11,26 +11,17 @@ const serverArtifactsController = function(
   this.grrRoutingService_ = grrRoutingService;
 
   /** @type {string} */
-  this.clientId;
-
-  /** @type {string} */
   this.selectedFlowId;
 
   /** @type {string} */
   this.tab;
-
-  /** @type {string} */
-  this.flowApiBasePath;
-
-  /** @type {string} */
-  this.exportBasePath;
 
   this.scope_.$watchGroup(
       ['controller.selectedFlowId', 'controller.tab'],
       this.onSelectionOrTabChange_.bind(this));
 
   this.grrRoutingService_.uiOnParamsChanged(
-    this.scope_, ['clientId', 'flowId', 'tab'],
+    this.scope_, ['flowId', 'tab'],
       this.onRoutingParamsChange_.bind(this));
 };
 
@@ -44,11 +35,8 @@ const serverArtifactsController = function(
  */
 serverArtifactsController.prototype.onRoutingParamsChange_ = function(
     unused_newValues, opt_stateParams) {
-  this.clientId = opt_stateParams['clientId'];
-  this.selectedFlowId = opt_stateParams['flowId'];
-  this.tab = opt_stateParams['tab'];
-  this.flowApiBasePath = 'v1/GetFlowDetails' + '/' + this.clientId;
-  this.exportBasePath = "v1/download/" + this.clientId;
+    this.selectedFlowId = opt_stateParams['flowId'];
+    this.tab = opt_stateParams['tab'];
 };
 
 
@@ -79,8 +67,9 @@ serverArtifactsController.prototype.newArtifactCollection = function() {
 
 serverArtifactsController.prototype.onSelectionOrTabChange_ = function() {
   if (angular.isDefined(this.selectedFlowId)) {
-    this.grrRoutingService_.go('client.flows',
-                               {flowId: this.selectedFlowId, tab: this.tab});
+      this.grrRoutingService_.go(
+          'server_artifacts',
+          {flowId: this.selectedFlowId, tab: this.tab});
   }
 };
 
@@ -90,7 +79,7 @@ exports.ServerArtifactsDirective = function() {
       "artifact": '=',
     },
     restrict: 'E',
-    templateUrl: '/static/angular-components/artifact/server-artifacts.html',
+    templateUrl: window.base_path+'/static/angular-components/artifact/server-artifacts.html',
     controller: serverArtifactsController,
     controllerAs: 'controller'
   };

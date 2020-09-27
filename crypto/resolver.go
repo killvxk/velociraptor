@@ -21,12 +21,13 @@ import (
 	"crypto/rsa"
 	"strings"
 	"sync"
+	"time"
 
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/datastore"
+	"www.velocidex.com/golang/velociraptor/paths"
 	"www.velocidex.com/golang/velociraptor/third_party/cache"
-	"www.velocidex.com/golang/velociraptor/urns"
 )
 
 type publicKeyResolver interface {
@@ -91,14 +92,16 @@ type serverPublicKeyResolver struct {
 
 func (self *serverPublicKeyResolver) GetPublicKey(
 	client_id string) (*rsa.PublicKey, bool) {
-	subject := urns.BuildURN("clients", client_id, "key")
+
+	client_path_manager := paths.NewClientPathManager(client_id)
 	db, err := datastore.GetDB(self.config_obj)
 	if err != nil {
 		return nil, false
 	}
 
 	pem := &crypto_proto.PublicKey{}
-	err = db.GetSubject(self.config_obj, subject, pem)
+	err = db.GetSubject(self.config_obj,
+		client_path_manager.Key().Path(), pem)
 	if err != nil {
 		return nil, false
 	}
@@ -113,16 +116,19 @@ func (self *serverPublicKeyResolver) GetPublicKey(
 
 func (self *serverPublicKeyResolver) SetPublicKey(
 	client_id string, key *rsa.PublicKey) error {
-	subject := urns.BuildURN("clients", client_id, "key")
+
+	client_path_manager := paths.NewClientPathManager(client_id)
 	db, err := datastore.GetDB(self.config_obj)
 	if err != nil {
 		return err
 	}
 
 	pem := &crypto_proto.PublicKey{
-		Pem: PublicKeyToPem(key),
+		Pem:        PublicKeyToPem(key),
+		EnrollTime: uint64(time.Now().Unix()),
 	}
-	return db.SetSubject(self.config_obj, subject, pem)
+	return db.SetSubject(self.config_obj,
+		client_path_manager.Key().Path(), pem)
 }
 
 func (self *serverPublicKeyResolver) Clear() {}
@@ -130,6 +136,6 @@ func (self *serverPublicKeyResolver) Clear() {}
 func NewServerPublicKeyResolver(config_obj *config_proto.Config) publicKeyResolver {
 	return &serverPublicKeyResolver{
 		config_obj: config_obj,
-		cache:      cache.NewLRUCache(1000),
+		cache:      cache.NewLRUCache(config_obj.Frontend.ExpectedClients),
 	}
 }

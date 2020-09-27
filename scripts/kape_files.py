@@ -55,11 +55,11 @@ def read_targets(ctx, project_path):
             glob = target.get("Path", "")
 
             if target.get("Recursive"):
-                glob += "/**10"
+                glob = glob.rstrip("\\") + "/**10"
 
             mask = target.get("FileMask")
             if mask:
-                glob += "/" + mask
+                glob = glob.rstrip("\\") + "/" + mask
 
             # Expand the targets in the glob
             if ".tkape" in glob:
@@ -69,7 +69,7 @@ def read_targets(ctx, project_path):
             ctx.groups[name].add(row_id)
 
             glob = strip_drive(glob)
-
+            glob = remove_fluff(glob)
             ctx.rows.append([
                 row_id,
                 target["Name"],
@@ -107,7 +107,7 @@ def sanitize(name):
 
 
 def strip_drive(name):
-    return re.sub("^[a-zA-Z]:\\\\", "", name)
+    return re.sub("^[a-zA-Z]:(\\\\|/)", "", name)
 
 def get_csv(rows):
     out = io.StringIO()
@@ -116,6 +116,9 @@ def get_csv(rows):
         writer.writerow(row)
 
     return out.getvalue()
+
+def remove_fluff(glob):
+    return glob.replace('%user%', '*')
 
 def format(ctx):
     template = """name: Windows.KapeFiles.Targets
@@ -160,6 +163,9 @@ parameters:
     type: bool
     default:
     description: If set we run the collection across all VSS and collect only unique changes.
+  - name: DontBeLazy
+    description: Normally we prefer to use lazy_ntfs for speed. Sometimes this might miss stuff so setting this will fallback to the regular ntfs accessor.
+    type: bool
 
 sources:
   - name: All File Metadata
@@ -192,7 +198,8 @@ sources:
                       collectionSpec=serialize(item=rule_specs_ntfs, format="csv"))
                }, b={
                    SELECT * FROM Artifact.Windows.Collectors.VSS(
-                      RootDevice=Device, Accessor="lazy_ntfs",
+                      RootDevice=Device, Accessor=if(condition=DontBeLazy,
+                                                     then="ntfs", else="lazy_ntfs"),
                       collectionSpec=serialize(item=rule_specs_lazy_ntfs, format="csv"))
                })
            }, else={
@@ -203,7 +210,8 @@ sources:
                       collectionSpec=serialize(item=rule_specs_ntfs, format="csv"))
                }, b={
                    SELECT * FROM Artifact.Windows.Collectors.File(
-                      RootDevice=Device, Accessor="lazy_ntfs",
+                      RootDevice=Device, Accessor=if(condition=DontBeLazy,
+                                                     then="ntfs", else="lazy_ntfs"),
                       collectionSpec=serialize(item=rule_specs_lazy_ntfs, format="csv"))
                })
            })

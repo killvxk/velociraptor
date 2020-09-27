@@ -19,17 +19,25 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
 
+	"github.com/Velocidex/ordereddict"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
-	artifacts "www.velocidex.com/golang/velociraptor/artifacts"
+	actions_proto "www.velocidex.com/golang/velociraptor/actions/proto"
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/file_store/csv"
+	"www.velocidex.com/golang/velociraptor/grpc_client"
+	"www.velocidex.com/golang/velociraptor/json"
+	logging "www.velocidex.com/golang/velociraptor/logging"
 	"www.velocidex.com/golang/velociraptor/reporting"
+	"www.velocidex.com/golang/velociraptor/services"
+	"www.velocidex.com/golang/velociraptor/startup"
+	"www.velocidex.com/golang/velociraptor/uploads"
+	"www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
-	vql_networking "www.velocidex.com/golang/velociraptor/vql/networking"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -41,32 +49,42 @@ var (
 
 	rate = app.Flag("ops_per_second", "Rate of execution").
 		Default("1000000").Float64()
-	format = query.Flag("format", "Output format to use.").
-		Default("json").Enum("text", "json", "csv")
-	dump_dir = query.Flag("dump_dir", "Directory to dump output files.").
-			Default(".").String()
+	format = query.Flag("format", "Output format to use (text,json,csv,jsonl).").
+		Default("json").Enum("text", "json", "csv", "jsonl")
 
-	env_map = app.Flag("env", "Environment for the query.").
+	dump_dir = query.Flag("dump_dir", "Directory to dump output files.").
+			Default("").String()
+
+	env_map = query.Flag("env", "Environment for the query.").
 		StringMap()
 
 	max_wait = app.Flag("max_wait", "Maximum time to queue results.").
 			Default("10").Int()
-
-	explain        = app.Command("explain", "Explain the output from a plugin")
-	explain_plugin = explain.Arg("plugin", "Plugin to explain").Required().String()
 )
 
 func outputJSON(ctx context.Context,
 	scope *vfilter.Scope,
 	vql *vfilter.VQL,
 	out io.Writer) {
-	result_chan := vfilter.GetResponseChannel(vql, ctx, scope, 10, *max_wait)
-	for {
-		result, ok := <-result_chan
-		if !ok {
-			return
-		}
-		out.Write(result.Payload)
+	for result := range vfilter.GetResponseChannel(
+		vql, ctx, scope,
+		vql_subsystem.MarshalJsonIndent(scope),
+		10, *max_wait) {
+		_, err := out.Write(result.Payload)
+		kingpin.FatalIfError(err, "outputJSON")
+	}
+}
+
+func outputJSONL(ctx context.Context,
+	scope *vfilter.Scope,
+	vql *vfilter.VQL,
+	out io.Writer) {
+	for result := range vfilter.GetResponseChannel(
+		vql, ctx, scope,
+		vql_subsystem.MarshalJsonl(scope),
+		10, *max_wait) {
+		_, err := out.Write(result.Payload)
+		kingpin.FatalIfError(err, "outputCSV")
 	}
 }
 
@@ -74,10 +92,12 @@ func outputCSV(ctx context.Context,
 	scope *vfilter.Scope,
 	vql *vfilter.VQL,
 	out io.Writer) {
-	result_chan := vfilter.GetResponseChannel(vql, ctx, scope, 10, *max_wait)
+	result_chan := vfilter.GetResponseChannel(vql, ctx, scope,
+		vql_subsystem.MarshalJson(scope),
+		10, *max_wait)
 
-	csv_writer, err := csv.GetCSVWriter(scope, &StdoutWrapper{out})
-	kingpin.FatalIfError(err, "outputCSV")
+	csv_writer := csv.GetCSVAppender(
+		scope, &StdoutWrapper{out}, true /* write_headers */)
 	defer csv_writer.Close()
 
 	for result := range result_chan {
@@ -86,7 +106,7 @@ func outputCSV(ctx context.Context,
 		kingpin.FatalIfError(err, "outputCSV")
 
 		for _, row := range payload {
-			row_dict := vfilter.NewDict()
+			row_dict := ordereddict.NewDict()
 			for _, column := range result.Columns {
 				value, pres := row[column]
 				if pres {
@@ -100,27 +120,145 @@ func outputCSV(ctx context.Context,
 
 }
 
-func doQuery() {
-	config_obj := get_config_or_default()
-	repository, err := artifacts.GetGlobalRepository(config_obj)
-	kingpin.FatalIfError(err, "Artifact GetGlobalRepository ")
-	repository.LoadDirectory(*artifact_definitions_dir)
+func doRemoteQuery(
+	config_obj *config_proto.Config, format string,
+	queries []string, env *ordereddict.Dict) {
+	ctx := context.Background()
+	client, closer, err := grpc_client.Factory.GetAPIClient(ctx, config_obj)
+	kingpin.FatalIfError(err, "GetAPIClient")
+	defer func() { _ = closer() }()
 
-	env := vfilter.NewDict().
-		Set("config", config_obj.Client).
-		Set("server_config", config_obj).
-		Set("$uploader", &vql_networking.FileBasedUploader{
-			UploadDir: *dump_dir,
-		}).
-		Set(vql_subsystem.CACHE_VAR, vql_subsystem.NewScopeCache())
+	logger := logging.GetLogger(config_obj, &logging.ToolComponent)
 
-	if env_map != nil {
-		for k, v := range *env_map {
-			env.Set(k, v)
+	request := &actions_proto.VQLCollectorArgs{
+		MaxRow:  1000,
+		MaxWait: 1,
+	}
+
+	if env != nil {
+		for _, k := range env.Keys() {
+			v, ok := env.GetString(k)
+			if ok {
+				request.Env = append(request.Env, &actions_proto.VQLEnv{
+					Key: k, Value: v})
+			}
 		}
 	}
 
-	scope := artifacts.MakeScope(repository).AppendVars(env)
+	for _, query := range queries {
+		request.Query = append(request.Query,
+			&actions_proto.VQLRequest{VQL: query})
+	}
+	stream, err := client.Query(context.Background(), request)
+	kingpin.FatalIfError(err, "GetAPIClient")
+
+	for {
+		response, err := stream.Recv()
+		if response == nil && err == io.EOF {
+			break
+		}
+		kingpin.FatalIfError(err, "GetAPIClient")
+
+		if response.Log != "" {
+			logger.Info(response.Log)
+			continue
+		}
+
+		json_response := response.Response
+		if json_response == "" {
+			json_response = response.JSONLResponse
+		}
+
+		rows, err := utils.ParseJsonToDicts([]byte(json_response))
+		kingpin.FatalIfError(err, "GetAPIClient")
+
+		switch format {
+		case "json":
+			fmt.Println(json.MarshalIndent(rows))
+
+		case "jsonl":
+			fmt.Println(json.MarshalJsonl(rows))
+
+		case "csv":
+			scope := vql_subsystem.MakeScope()
+
+			csv_writer := csv.GetCSVAppender(
+				scope, &StdoutWrapper{os.Stdout}, true /* write_headers */)
+			defer csv_writer.Close()
+
+			for _, row := range rows {
+				csv_writer.Write(row)
+			}
+		}
+	}
+}
+
+func startEssentialServices(config_obj *config_proto.Config) (
+	*services.Service, error) {
+
+	sm := services.NewServiceManager(context.Background(), config_obj)
+	err := startup.StartupEssentialServices(sm)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load any artifacts defined in the config file after all the
+	// services are up.
+	err = load_config_artifacts(config_obj)
+	return sm, err
+}
+
+func doQuery() {
+	config_obj, err := APIConfigLoader.WithNullLoader().LoadAndValidate()
+	kingpin.FatalIfError(err, "Load Config")
+
+	sm, err := startEssentialServices(config_obj)
+	kingpin.FatalIfError(err, "Starting services.")
+	defer sm.Close()
+
+	env := ordereddict.NewDict()
+	for k, v := range *env_map {
+		env.Set(k, v)
+	}
+
+	if config_obj.ApiConfig != nil && config_obj.ApiConfig.Name != "" {
+		logging.GetLogger(config_obj, &logging.ToolComponent).
+			Info("API Client configuration loaded - will make gRPC connection.")
+		doRemoteQuery(config_obj, *format, *queries, env)
+		return
+	}
+
+	// Initialize the repository in case the artifacts use it
+	_, err = getRepository(config_obj)
+	kingpin.FatalIfError(err, "Artifact GetGlobalRepository ")
+
+	builder := services.ScopeBuilder{
+		Config:     config_obj,
+		ACLManager: vql_subsystem.NullACLManager{},
+		Logger:     log.New(&LogWriter{config_obj}, "", 0),
+		Env:        ordereddict.NewDict(),
+	}
+
+	if *run_as != "" {
+		builder.ACLManager = vql_subsystem.NewServerACLManager(config_obj, *run_as)
+	}
+
+	// Configure an uploader if required.
+	if *dump_dir != "" {
+		builder.Uploader = &uploads.FileBasedUploader{
+			UploadDir: *dump_dir,
+		}
+	}
+
+	if env_map != nil {
+		for k, v := range *env_map {
+			builder.Env.Set(k, v)
+		}
+	}
+
+	manager, err := services.GetRepositoryManager()
+	kingpin.FatalIfError(err, "GetRepositoryManager")
+	scope := manager.BuildScope(builder)
 	defer scope.Close()
 
 	// Install throttler into the scope.
@@ -128,49 +266,34 @@ func doQuery() {
 
 	ctx := InstallSignalHandler(scope)
 
-	scope.Logger = log.New(os.Stderr, "velociraptor: ", log.Lshortfile)
+	if *trace_vql_flag {
+		scope.Tracer = log.New(os.Stderr, "VQL Trace: ", 0)
+	}
 	for _, query := range *queries {
-		vql, err := vfilter.Parse(query)
-		if err != nil {
-			kingpin.FatalIfError(err, "Unable to parse VQL Query")
+		statements, err := vfilter.MultiParse(query)
+		kingpin.FatalIfError(err, "Unable to parse VQL Query")
+
+		for _, vql := range statements {
+			switch *format {
+			case "text":
+				table := reporting.EvalQueryToTable(ctx, scope, vql, os.Stdout)
+				table.Render()
+			case "json":
+				outputJSON(ctx, scope, vql, os.Stdout)
+
+			case "jsonl":
+				outputJSONL(ctx, scope, vql, os.Stdout)
+
+			case "csv":
+				outputCSV(ctx, scope, vql, os.Stdout)
+			}
 		}
-
-		switch *format {
-		case "text":
-			table := reporting.EvalQueryToTable(ctx, scope, vql, os.Stdout)
-			table.Render()
-		case "json":
-			outputJSON(ctx, scope, vql, os.Stdout)
-		case "csv":
-			outputCSV(ctx, scope, vql, os.Stdout)
-		}
-	}
-}
-
-func doExplain(plugin string) {
-	result := vfilter.NewDict()
-	type_map := vfilter.NewTypeMap()
-	scope := vql_subsystem.MakeScope()
-	defer scope.Close()
-
-	pslist_info, pres := scope.Info(type_map, plugin)
-	if pres {
-		result.Set(plugin+"_info", pslist_info)
-		result.Set("type_map", type_map)
-	}
-
-	s, err := json.MarshalIndent(result, "", " ")
-	if err == nil {
-		os.Stdout.Write(s)
 	}
 }
 
 func init() {
 	command_handlers = append(command_handlers, func(command string) bool {
 		switch command {
-		case explain.FullCommand():
-			doExplain(*explain_plugin)
-
 		case query.FullCommand():
 			doQuery()
 

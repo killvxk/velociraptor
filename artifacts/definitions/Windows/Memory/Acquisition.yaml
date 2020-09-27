@@ -6,19 +6,21 @@ description: |
   NOTE: This artifact usually takes a long time. You should increase
   the default timeout to allow it to complete.
 
+tools:
+  - name: WinPmem
+    url: https://github.com/Velocidex/c-aff4/releases/download/v3.3.rc3/winpmem_v3.3.rc3.exe
+
 sources:
   - queries:
       - SELECT * FROM foreach(
           row={
             SELECT FullPath, tempfile(data="X", extension=".aff4") AS Tempfile
-            FROM Artifact.Windows.Utils.FetchBinary(
-                ToolName="WinPmem",
-                binaryURL=binaryURL)
+            FROM Artifact.Generic.Utils.FetchBinary(ToolName="WinPmem")
           },
           query={
             SELECT Stdout, Stderr,
                    if(condition=Complete,
-                      then=upload(file=Tempfile)) As Upload
+                      then=upload(file=Tempfile, name="PhysicalMemory.aff4")) As Upload
             FROM execve(
                argv=[FullPath, "-dd", "-o", Tempfile, "-t", "-c", "snappy"],
                sep="\r\n")

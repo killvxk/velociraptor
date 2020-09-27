@@ -26,9 +26,7 @@ import (
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 )
 
-var (
-	implementations map[string]DataStore
-)
+type WalkFunc func(urn string) error
 
 type DataStore interface {
 	// Retrieve all the client's tasks.
@@ -67,6 +65,9 @@ type DataStore interface {
 		urn string,
 		offset uint64, length uint64) ([]string, error)
 
+	Walk(config_obj *config_proto.Config,
+		root string, walkFn WalkFunc) error
+
 	// Update the posting list index. Searching for any of the
 	// keywords will return the entity urn.
 	SetIndex(
@@ -97,24 +98,26 @@ type DataStore interface {
 	Close()
 }
 
-func RegisterImplementation(name string, impl DataStore) {
-	if implementations == nil {
-		implementations = make(map[string]DataStore)
-	}
-
-	implementations[name] = impl
-}
-
-func GetImpl(name string) (DataStore, bool) {
-	result, pres := implementations[name]
-	return result, pres
-}
-
 func GetDB(config_obj *config_proto.Config) (DataStore, error) {
-	db, pres := GetImpl(config_obj.Datastore.Implementation)
-	if !pres {
-		return nil, errors.New("no datastore implementation")
+	if config_obj.Datastore == nil {
+		return nil, errors.New("no datastore configured")
 	}
 
-	return db, nil
+	switch config_obj.Datastore.Implementation {
+	case "FileBaseDataStore":
+		return file_based_imp, nil
+
+	case "MySQL":
+		return NewMySQLDataStore(config_obj)
+
+	case "Test":
+		mu.Lock()
+		defer mu.Unlock()
+
+		return gTestDatastore, nil
+
+	default:
+		return nil, errors.New("no datastore implementation " +
+			config_obj.Datastore.Implementation)
+	}
 }

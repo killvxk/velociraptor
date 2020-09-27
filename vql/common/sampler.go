@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 
+	"github.com/Velocidex/ordereddict"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	vfilter "www.velocidex.com/golang/vfilter"
 )
@@ -16,7 +17,7 @@ type _SamplerPlugin struct{}
 
 func (self _SamplerPlugin) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
@@ -29,10 +30,19 @@ func (self _SamplerPlugin) Call(ctx context.Context,
 			return
 		}
 
+		if arg.N == 0 {
+			arg.N = 1
+		}
+
 		count := 0
 		for row := range arg.Query.Eval(ctx, scope) {
 			if count%int(arg.N) == 0 {
-				output_chan <- row
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- row:
+				}
 			}
 			count += 1
 		}

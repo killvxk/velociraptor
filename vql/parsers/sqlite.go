@@ -26,13 +26,14 @@ package parsers
 
 import (
 	"context"
+	"io/ioutil"
 	"os"
 	"reflect"
 	"strings"
 
+	"github.com/Velocidex/ordereddict"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/tink-ab/tempfile"
 	"www.velocidex.com/golang/velociraptor/glob"
 	utils "www.velocidex.com/golang/velociraptor/utils"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
@@ -51,10 +52,11 @@ type _SQLitePlugin struct{}
 func (self _SQLitePlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 	go func() {
 		defer close(output_chan)
+		defer utils.RecoverVQL(scope)
 
 		arg := &_SQLiteArgs{}
 		err := vfilter.ExtractArgs(scope, args, arg)
@@ -66,6 +68,13 @@ func (self _SQLitePlugin) Call(
 		if arg.Accessor == "" {
 			arg.Accessor = "file"
 		}
+
+		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+		if err != nil {
+			scope.Log("sqlite: %s", err)
+			return
+		}
+
 		handle, err := self.GetHandle(ctx, arg, scope)
 		if err != nil {
 			scope.Log("sqlite: %v", err)
@@ -99,7 +108,7 @@ func (self _SQLitePlugin) Call(
 		}
 
 		for rows.Next() {
-			row := vfilter.NewDict()
+			row := ordereddict.NewDict()
 			values, err := rows.SliceScan()
 			if err != nil {
 				scope.Log("sqlite: %v", err)
@@ -115,7 +124,12 @@ func (self _SQLitePlugin) Call(
 				row.Set(item, value)
 			}
 
-			output_chan <- row
+			select {
+			case <-ctx.Done():
+				return
+
+			case output_chan <- row:
+			}
 		}
 
 	}()
@@ -188,7 +202,8 @@ func (self _SQLitePlugin) _MakeTempfile(
 	if arg.Accessor != "data" {
 		scope.Log("Will try to copy to temp file: %v", filename)
 	}
-	tmpfile, err := tempfile.TempFile("", "tmp", ".sqlite")
+
+	tmpfile, err := ioutil.TempFile("", "tmp*.sqlite")
 	if err != nil {
 		return "", err
 	}
@@ -203,7 +218,7 @@ func (self _SQLitePlugin) _MakeTempfile(
 		}
 	})
 
-	fs, err := glob.GetAccessor(arg.Accessor, ctx)
+	fs, err := glob.GetAccessor(arg.Accessor, scope)
 	if err != nil {
 		return "", err
 	}

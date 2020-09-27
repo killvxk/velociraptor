@@ -15,10 +15,12 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-package vql
+package linux
 
 import (
+	"github.com/Velocidex/ordereddict"
 	"github.com/shirou/gopsutil/net"
+	"www.velocidex.com/golang/velociraptor/acls"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -29,8 +31,15 @@ func init() {
 			PluginName: "connections",
 			Function: func(
 				scope *vfilter.Scope,
-				args *vfilter.Dict) []vfilter.Row {
+				args *ordereddict.Dict) []vfilter.Row {
 				var result []vfilter.Row
+
+				err := vql_subsystem.CheckAccess(scope, acls.MACHINE_STATE)
+				if err != nil {
+					scope.Log("connections: %s", err)
+					return result
+				}
+
 				if cons, err := net.Connections("all"); err == nil {
 					for _, item := range cons {
 						result = append(result, item)
@@ -38,7 +47,6 @@ func init() {
 				}
 				return result
 			},
-			Doc:     "List all active connections",
-			RowType: net.ConnectionStat{},
+			Doc: "List all active connections",
 		})
 }

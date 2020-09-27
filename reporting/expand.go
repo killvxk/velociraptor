@@ -12,9 +12,10 @@ import (
 
 	"text/template"
 
+	"github.com/Velocidex/ordereddict"
 	"github.com/olekukonko/tablewriter"
-	"www.velocidex.com/golang/velociraptor/artifacts"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"www.velocidex.com/golang/velociraptor/services"
 	"www.velocidex.com/golang/velociraptor/utils"
 	"www.velocidex.com/golang/vfilter"
 )
@@ -27,25 +28,23 @@ func EvalQueryToTable(ctx context.Context,
 	output_chan := vql.Eval(ctx, scope)
 	table := tablewriter.NewWriter(out)
 
-	columns := vql.Columns(scope)
-	table.SetHeader(*columns)
+	columns := []string{}
 	table.SetCaption(true, vql.ToString(scope))
 	table.SetAutoFormatHeaders(false)
 	table.SetAutoWrapText(false)
 
 	for row := range output_chan {
 		string_row := []string{}
-		if len(*columns) == 0 {
-			members := scope.GetMembers(row)
-			table.SetHeader(members)
-			columns = &members
+		if len(columns) == 0 {
+			columns = scope.GetMembers(row)
+			table.SetHeader(columns)
 		}
 
-		for _, key := range *columns {
+		for _, key := range columns {
 			cell := ""
 			value, pres := scope.Associative(row, key)
 			if pres && !utils.IsNil(value) {
-				cell = utils.Stringify(value, scope, 120/len(*columns))
+				cell = utils.Stringify(value, scope, 120/len(columns))
 			}
 			string_row = append(string_row, cell)
 		}
@@ -60,6 +59,7 @@ func EvalQueryToTable(ctx context.Context,
 type Expansions struct {
 	config_obj *config_proto.Config
 	rows       []vfilter.Row
+	scope      *vfilter.Scope
 }
 
 // Support a number of expansions in description strings.
@@ -86,7 +86,6 @@ func FormatDescription(
 
 	err = tmpl.Execute(buffer, expansion)
 	if err != nil {
-		utils.Debug(err)
 		return description
 	}
 
@@ -94,12 +93,17 @@ func FormatDescription(
 }
 
 func (self *Expansions) DocFrom(artifact string) string {
-	repository, err := artifacts.GetGlobalRepository(self.config_obj)
+	manager, err := services.GetRepositoryManager()
 	if err != nil {
 		return ""
 	}
 
-	artifact_definition, pres := repository.Get(artifact)
+	repository, err := manager.GetGlobalRepository(self.config_obj)
+	if err != nil {
+		return ""
+	}
+
+	artifact_definition, pres := repository.Get(self.config_obj, artifact)
 	if !pres {
 		return ""
 	}
@@ -110,25 +114,22 @@ func (self *Expansions) DocFrom(artifact string) string {
 func (self *Expansions) Query(queries ...string) string {
 	result := &bytes.Buffer{}
 
-	repository, err := artifacts.GetGlobalRepository(self.config_obj)
-	if err != nil {
-		return fmt.Sprintf("Error: %v", err)
-	}
+	env := ordereddict.NewDict().Set("Rows", self.rows)
+	scope := self.scope.Copy().AppendVars(env)
 
-	env := vfilter.NewDict().Set("Rows", self.rows)
-
-	scope := artifacts.MakeScope(repository).AppendVars(env)
 	defer scope.Close()
 
-	scope.Logger = log.New(os.Stderr, "velociraptor: ", log.Lshortfile)
+	scope.Logger = log.New(os.Stderr, " ", 0)
 
 	for _, query := range queries {
 		vql, err := vfilter.Parse(query)
 		if err != nil {
 			return fmt.Sprintf("Error: %v", err)
 		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-		table := EvalQueryToTable(context.Background(), scope, vql, result)
+		table := EvalQueryToTable(ctx, scope, vql, result)
 		table.Render()
 	}
 

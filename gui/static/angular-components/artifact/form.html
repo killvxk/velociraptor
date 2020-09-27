@@ -7,18 +7,30 @@
              uib-datepicker-popup="{{format}}"
              ng-model="controller.date_time"
              is-open="controller.popup_opened"
-             datepicker-options="dateOptions"
-             ng-required="true"
+             datepicker-options="controller.dateOptions"
+             ng-required="false"
              close-text="Close"
-             alt-input-formats="altInputFormats" />
+             alt-input-formats="controller.altInputFormats"></input>
       <span class="input-group-btn">
         <button type="button"
                 class="btn btn-default"
-                ng-click="controller.openDatePopup()">
+                ng-click="controller.openDatePopup($event)">
           <i class="fa fa-calendar"></i>
         </button>
       </span>
     </p>
+  </div>
+
+  <div ng-switch-when="csv">
+    <grr-csv-form value="value" field="field">
+    </grr-csv-form>
+  </div>
+
+  <div ng-switch-when="choices">
+    <select class="form-control pull-left"
+            ng-options="choice for choice in info.choices"
+            ng-model="value[field]">
+    </select>
   </div>
 
   <div ng-switch-when="bool">
@@ -32,7 +44,20 @@
      </span>
   </div>
   <div ng-switch-default>
-    <input class="form-control"
-           ng-model="value[field]"></input>
-  </div>
+    <div class="input-group">
+      <textarea class="form-control col-11"
+                ng-model="value[field]"
+                ng-attr-rows="{$ controller.text_size $}"
+                ></textarea>
+      <div class="input-group-append">
+        <button class="btn btn-outline-default"
+                ng-click="controller.resizeTextArea($event)"
+                >
+          <i class="fa fa-chevron-down"
+             ng-if="controller.text_size==1"></i>
+          <i class="fa fa-chevron-up"
+             ng-if="controller.text_size!=1"></i>
+        </button>
+      </div>
+    </div>
 </div>

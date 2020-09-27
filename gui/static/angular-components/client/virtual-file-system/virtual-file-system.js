@@ -5,6 +5,7 @@ goog.module.declareLegacyNamespace();
 
 const {AddItemButtonDirective} = goog.require('grrUi.client.virtualFileSystem.addItemButtonDirective');
 const {BreadcrumbsDirective} = goog.require('grrUi.client.virtualFileSystem.breadcrumbsDirective');
+const {DownloadDirective} = goog.require('grrUi.client.virtualFileSystem.downloadDirective');
 const {FileContextDirective} = goog.require('grrUi.client.virtualFileSystem.fileContextDirective');
 const {FileDetailsDirective} = goog.require('grrUi.client.virtualFileSystem.fileDetailsDirective');
 const {FileHexViewDirective} = goog.require('grrUi.client.virtualFileSystem.fileHexViewDirective');
@@ -16,21 +17,20 @@ const {FileViewDirective} = goog.require('grrUi.client.virtualFileSystem.fileVie
 const {RecursiveListButtonDirective} = goog.require('grrUi.client.virtualFileSystem.recursiveListButtonDirective');
 const {VfsFilesArchiveButtonDirective} = goog.require('grrUi.client.virtualFileSystem.vfsFilesArchiveButtonDirective');
 const {coreModule} = goog.require('grrUi.core.core');
-const {semanticModule} = goog.require('grrUi.semantic.semantic');
-
-
 
 /**
  * Angular module for clients-related UI.
  */
 exports.virtualFileSystemModule = angular.module(
   'grrUi.client.virtualFileSystem',
-  [coreModule.name, semanticModule.name, 'ui.ace', 'ui.bootstrap']);
+  [coreModule.name, 'ui.ace', 'ui.bootstrap']);
 
 exports.virtualFileSystemModule.directive(
     AddItemButtonDirective.directive_name, AddItemButtonDirective);
 exports.virtualFileSystemModule.directive(
     BreadcrumbsDirective.directive_name, BreadcrumbsDirective);
+exports.virtualFileSystemModule.directive(
+    DownloadDirective.directive_name, DownloadDirective);
 exports.virtualFileSystemModule.directive(
     FileContextDirective.directive_name, FileContextDirective);
 exports.virtualFileSystemModule.directive(

@@ -21,8 +21,11 @@ import (
 	"context"
 	"io"
 
+	"github.com/Velocidex/ordereddict"
 	"github.com/pkg/errors"
 	"github.com/shirou/gopsutil/disk"
+	"www.velocidex.com/golang/velociraptor/artifacts"
+	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/glob"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
@@ -30,6 +33,7 @@ import (
 
 type GlobPluginArgs struct {
 	Globs    []string `vfilter:"required,field=globs,doc=One or more glob patterns to apply to the filesystem."`
+	Root     string   `vfilter:"optional,field=root,doc=The root directory to glob from (default '')."`
 	Accessor string   `vfilter:"optional,field=accessor,doc=An accessor to use."`
 }
 
@@ -38,12 +42,17 @@ type GlobPlugin struct{}
 func (self GlobPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	globber := make(glob.Globber)
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
 		defer close(output_chan)
+
+		config_obj, ok := artifacts.GetServerConfig(scope)
+		if !ok {
+			config_obj = &config_proto.Config{}
+		}
 
 		arg := &GlobPluginArgs{}
 		err := vfilter.ExtractArgs(scope, args, arg)
@@ -51,36 +60,57 @@ func (self GlobPlugin) Call(
 			scope.Log("glob: %s", err.Error())
 			return
 		}
-		accessor, err := glob.GetAccessor(arg.Accessor, ctx)
+
+		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+		if err != nil {
+			scope.Log("glob: %s", err.Error())
+			return
+		}
+
+		accessor, err := glob.GetAccessor(arg.Accessor, scope)
 		if err != nil {
 			scope.Log("glob: %v", err)
 			return
 		}
 
-		root := ""
-		for _, item := range arg.Globs {
-			item_root, item_path, _ := accessor.GetRoot(item)
-			if root != "" && root != item_root {
-				scope.Log("glob: %s: Must use the same root for "+
-					"all globs. Skipping.", item)
-				continue
+		root := arg.Root
+
+		// If root is not specified we try to find a common
+		// root from the globs.
+		if root == "" {
+			for _, item := range arg.Globs {
+				item_root, item_path, _ := accessor.GetRoot(item)
+				if root != "" && root != item_root {
+					scope.Log("glob: %s: Must use the same root for "+
+						"all globs. Skipping.", item)
+					continue
+				}
+				root = item_root
+				err = globber.Add(item_path, accessor.PathSplit)
+				if err != nil {
+					scope.Log("glob: %v", err)
+					return
+				}
 			}
-			root = item_root
-			globber.Add(item_path, accessor.PathSplit)
+
+		} else {
+			for _, item := range arg.Globs {
+				err = globber.Add(item, accessor.PathSplit)
+				if err != nil {
+					scope.Log("glob: %v", err)
+					return
+				}
+			}
 		}
 
 		file_chan := globber.ExpandWithContext(
-			ctx, root, accessor)
-		for {
+			ctx, config_obj, root, accessor)
+		for f := range file_chan {
 			select {
 			case <-ctx.Done():
 				return
 
-			case f, ok := <-file_chan:
-				if !ok {
-					return
-				}
-				output_chan <- f
+			case output_chan <- f:
 			}
 		}
 	}()
@@ -92,8 +122,8 @@ func (self GlobPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vf
 	return &vfilter.PluginInfo{
 		Name:    "glob",
 		Doc:     "Retrieve files based on a list of glob expressions",
-		RowType: type_map.AddType(scope, glob.NewVirtualDirectoryPath("", nil)),
 		ArgType: type_map.AddType(scope, &GlobPluginArgs{}),
+		Version: 1,
 	}
 }
 
@@ -116,49 +146,44 @@ func (self ReadFilePlugin) processFile(
 	ctx context.Context,
 	scope *vfilter.Scope,
 	arg *ReadFileArgs,
+	accessor glob.FileSystemAccessor,
 	file string,
 	output_chan chan vfilter.Row) {
 	total_len := int64(0)
 
-	accessor, err := glob.GetAccessor(arg.Accessor, ctx)
-	if err != nil {
-		scope.Log("read_file: %v", err)
-		return
-	}
 	fd, err := accessor.Open(file)
-
 	if err != nil {
-		scope.Log("%s: %s", self.Name(), err.Error())
 		return
 	}
 	defer fd.Close()
 
 	buf := make([]byte, arg.Chunk)
 	for {
+		n, err := io.ReadAtLeast(fd, buf, arg.Chunk)
+		if err != nil &&
+			errors.Cause(err) != io.ErrUnexpectedEOF &&
+			errors.Cause(err) != io.EOF {
+			scope.Log("read_file: %v", err)
+			return
+		}
+
+		if n == 0 {
+			return
+		}
+		response := &ReadFileResponse{
+			Data:     string(buf[:n]),
+			Offset:   total_len,
+			Filename: file,
+		}
+
 		select {
 		case <-ctx.Done():
 			return
-
-		default:
-			n, err := io.ReadAtLeast(fd, buf, arg.Chunk)
-			if err != nil &&
-				errors.Cause(err) != io.ErrUnexpectedEOF &&
-				errors.Cause(err) != io.EOF {
-				scope.Log("read_file: %v", err)
-				return
-			}
-
-			if n == 0 {
-				return
-			}
-			response := &ReadFileResponse{
-				Data:     string(buf[:n]),
-				Offset:   total_len,
-				Filename: file,
-			}
-			output_chan <- response
-			total_len += int64(n)
+		case output_chan <- response:
 		}
+
+		total_len += int64(n)
+
 		if arg.MaxLength > 0 &&
 			total_len > int64(arg.MaxLength) {
 			break
@@ -170,7 +195,7 @@ func (self ReadFilePlugin) processFile(
 func (self ReadFilePlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	arg := &ReadFileArgs{}
@@ -187,8 +212,23 @@ func (self ReadFilePlugin) Call(
 
 	go func() {
 		defer close(output_chan)
+
+		err := vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
+		if err != nil {
+			scope.Log("read_file: %s", err.Error())
+			return
+		}
+
+		accessor, err := glob.GetAccessor(arg.Accessor, scope)
+		if err != nil {
+			scope.Log("read_file: %v", err)
+			return
+		}
+
 		for _, file := range arg.Filenames {
-			self.processFile(ctx, scope, arg, file, output_chan)
+			self.processFile(
+				ctx, scope, arg, accessor,
+				file, output_chan)
 		}
 	}()
 
@@ -203,8 +243,62 @@ func (self ReadFilePlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap)
 	return &vfilter.PluginInfo{
 		Name:    "read_file",
 		Doc:     "Read files in chunks.",
-		RowType: type_map.AddType(scope, ReadFileResponse{}),
 		ArgType: type_map.AddType(scope, &ReadFileArgs{}),
+	}
+}
+
+type ReadFileFunctionArgs struct {
+	Length   int    `vfilter:"optional,field=length,doc=Max length of the file to read."`
+	Filename string `vfilter:"required,field=filename,doc=One or more files to open."`
+	Accessor string `vfilter:"optional,field=accessor,doc=An accessor to use."`
+}
+
+type ReadFileFunction struct{}
+
+func (self *ReadFileFunction) Call(ctx context.Context,
+	scope *vfilter.Scope,
+	args *ordereddict.Dict) vfilter.Any {
+	arg := &ReadFileFunctionArgs{}
+	err := vfilter.ExtractArgs(scope, args, arg)
+	if err != nil {
+		scope.Log("read_file: %s", err.Error())
+		return ""
+	}
+
+	if arg.Length == 0 {
+		arg.Length = 4 * 1024 * 1024
+	}
+
+	accessor, err := glob.GetAccessor(arg.Accessor, scope)
+	if err != nil {
+		scope.Log("read_file: %v", err)
+		return ""
+	}
+
+	buf := make([]byte, arg.Length)
+
+	fd, err := accessor.Open(arg.Filename)
+	if err != nil {
+		return ""
+	}
+	defer fd.Close()
+
+	n, err := io.ReadAtLeast(fd, buf, len(buf))
+	if err != nil &&
+		errors.Cause(err) != io.ErrUnexpectedEOF &&
+		errors.Cause(err) != io.EOF {
+		scope.Log("read_file: %v", err)
+		return ""
+	}
+
+	return string(buf[:n])
+}
+
+func (self ReadFileFunction) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+	return &vfilter.FunctionInfo{
+		Name:    "read_file",
+		Doc:     "Read a file into a string.",
+		ArgType: type_map.AddType(scope, &ReadFileFunctionArgs{}),
 	}
 }
 
@@ -218,7 +312,7 @@ type StatPlugin struct{}
 func (self *StatPlugin) Call(
 	ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) <-chan vfilter.Row {
+	args *ordereddict.Dict) <-chan vfilter.Row {
 	output_chan := make(chan vfilter.Row)
 
 	go func() {
@@ -227,19 +321,30 @@ func (self *StatPlugin) Call(
 		arg := &StatArgs{}
 		err := vfilter.ExtractArgs(scope, args, arg)
 		if err != nil {
-			scope.Log("%s: %s", "stat", err.Error())
+			scope.Log("stat: %s", err.Error())
 			return
 		}
 
-		accessor, err := glob.GetAccessor(arg.Accessor, ctx)
+		err = vql_subsystem.CheckFilesystemAccess(scope, arg.Accessor)
 		if err != nil {
-			scope.Log("%s: %s", "stat", err.Error())
+			scope.Log("stat: %s", err.Error())
+			return
+		}
+
+		accessor, err := glob.GetAccessor(arg.Accessor, scope)
+		if err != nil {
+			scope.Log("stat: %s", err.Error())
 			return
 		}
 		for _, filename := range arg.Filename {
 			f, err := accessor.Lstat(filename)
 			if err == nil {
-				output_chan <- f
+				select {
+				case <-ctx.Done():
+					return
+
+				case output_chan <- f:
+				}
 			}
 		}
 	}()
@@ -255,7 +360,7 @@ func (self StatPlugin) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vf
 	return &vfilter.PluginInfo{
 		Name:    "stat",
 		Doc:     "Get file information. Unlike glob() this does not support wildcards.",
-		ArgType: "StatArgs",
+		ArgType: type_map.AddType(scope, &StatArgs{}),
 	}
 }
 
@@ -267,7 +372,7 @@ func init() {
 			PluginName: "filesystems",
 			Function: func(
 				scope *vfilter.Scope,
-				args *vfilter.Dict) []vfilter.Row {
+				args *ordereddict.Dict) []vfilter.Row {
 				var result []vfilter.Row
 				partitions, err := disk.Partitions(true)
 				if err == nil {
@@ -277,7 +382,7 @@ func init() {
 				}
 				return result
 			},
-			RowType: disk.PartitionStat{},
 		})
 	vql_subsystem.RegisterPlugin(&StatPlugin{})
+	vql_subsystem.RegisterFunction(&ReadFileFunction{})
 }

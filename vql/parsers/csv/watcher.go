@@ -5,8 +5,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Velocidex/ordereddict"
 	"www.velocidex.com/golang/velociraptor/file_store/csv"
 	"www.velocidex.com/golang/velociraptor/glob"
+	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
 
@@ -64,13 +66,22 @@ func (self *CSVWatcherService) Register(
 // Monitor the filename for new events and emit them to all interested
 // listeners. If no listeners exist we terminate.
 func (self *CSVWatcherService) StartMonitoring(
-	filename string, accessor string) {
+	filename string, accessor_name string) {
+
+	scope := vql_subsystem.MakeScope()
+	defer scope.Close()
+
+	accessor, err := glob.GetAccessor(accessor_name, scope)
+	if err != nil {
+		return
+	}
+
 	last_event := self.findLastEvent(filename, accessor)
 	no_handlers := false
 
 	for {
 		last_event, no_handlers = self.monitorOnce(
-			filename, accessor, last_event)
+			filename, accessor_name, accessor, last_event)
 		if no_handlers {
 			break
 		}
@@ -81,13 +92,7 @@ func (self *CSVWatcherService) StartMonitoring(
 
 func (self *CSVWatcherService) findLastEvent(
 	filename string,
-	accessor_name string) int {
-
-	accessor, err := glob.GetAccessor(
-		accessor_name, context.Background())
-	if err != nil {
-		return 0
-	}
+	accessor glob.FileSystemAccessor) int {
 
 	fd, err := accessor.Open(filename)
 	if err != nil {
@@ -110,6 +115,7 @@ func (self *CSVWatcherService) findLastEvent(
 func (self *CSVWatcherService) monitorOnce(
 	filename string,
 	accessor_name string,
+	accessor glob.FileSystemAccessor,
 	last_event int) (int, bool) {
 
 	self.mu.Lock()
@@ -118,12 +124,6 @@ func (self *CSVWatcherService) monitorOnce(
 	key := filename + accessor_name
 	handles, pres := self.registrations[key]
 	if !pres {
-		return 0, false
-	}
-
-	accessor, err := glob.GetAccessor(
-		accessor_name, context.Background())
-	if err != nil {
 		return 0, false
 	}
 
@@ -145,8 +145,11 @@ func (self *CSVWatcherService) monitorOnce(
 		return 0, false
 	}
 
-	// Seek to the last place we were.
-	csv_reader.Seek(int64(last_event))
+	// Seek to the last place we were - file must be seekable.
+	err = csv_reader.Seek(int64(last_event))
+	if err != nil {
+		return 0, false
+	}
 	for {
 		row_data, err := csv_reader.ReadAny()
 		if err != nil {
@@ -154,7 +157,7 @@ func (self *CSVWatcherService) monitorOnce(
 		}
 		last_event = int(csv_reader.ByteOffset)
 
-		row := vfilter.NewDict()
+		row := ordereddict.NewDict()
 		for idx, row_item := range row_data {
 			if idx > len(headers) {
 				break
@@ -191,8 +194,6 @@ func (self *CSVWatcherService) monitorOnce(
 		self.registrations[key] = new_handles
 		handles = new_handles
 	}
-
-	return last_event, false
 }
 
 // A handle is given for each interested party. We write the event on

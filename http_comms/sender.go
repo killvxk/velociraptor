@@ -16,6 +16,12 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+// Diagram to illustrate outgoing messages:
+// executor -> ring buffer -> sender -> server
+
+// The sender pushes messages through these channels:
+// PumpExecutorToRingBuffer() -> PumpRingBufferToSendMessage() -> sendMessageList()
+
 package http_comms
 
 import (
@@ -23,14 +29,15 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/golang/protobuf/proto"
+	errors "github.com/pkg/errors"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/crypto"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/executor"
 	"www.velocidex.com/golang/velociraptor/logging"
+	"www.velocidex.com/golang/velociraptor/utils"
 )
 
 type Sender struct {
@@ -43,18 +50,26 @@ type Sender struct {
 	release chan bool
 
 	ring_buffer IRingBuffer
+
+	// An in-memory ring buffer for urgent packets.
+	urgent_buffer *RingBuffer
+
+	clock utils.Clock
 }
 
 // Persistant loop to pump messages from the executor to the ring
-// buffer.
+// buffer. This function should never exit in a real client.
 func (self *Sender) PumpExecutorToRingBuffer(ctx context.Context) {
+	// We should never exit from this.
+	defer self.maybeCallOnExit()
+
 	// Pump messages from the executor to the pending message list
 	// - this is our local queue of output pending messages.
 	executor_chan := self.executor.ReadResponse()
 
 	for {
 		if atomic.LoadInt32(&self.IsPaused) != 0 {
-			time.Sleep(self.minPoll)
+			self.clock.Sleep(self.minPoll)
 			continue
 		}
 
@@ -62,37 +77,53 @@ func (self *Sender) PumpExecutorToRingBuffer(ctx context.Context) {
 		case <-ctx.Done():
 			return
 
-		case msg := <-executor_chan:
+		case msg, ok := <-executor_chan:
 			// Executor closed the channel.
-			if msg == nil {
+			if !ok {
 				return
 			}
 
-			// NOTE: This is kind of a hack. We hold in
-			// memory a bunch of GrrMessage proto objects
-			// and we want to serialize them into a
-			// MessageList proto one at the time (so we
-			// can track how large the final message is
-			// going to be). We use the special wire
-			// format property of protobufs that repeated
-			// fields can be appended on the wire, and
-			// then parsed as a single message. This saves
-			// us encoding the GrrMessage just to see how
-			// large it is going to be and then encoding
-			// it again.
-			item := &crypto_proto.MessageList{
-				Job: []*crypto_proto.GrrMessage{msg}}
-			serialized_msg, err := proto.Marshal(item)
-			if err != nil {
-				// Can't serialize the message
-				// - drop it on the floor.
-				continue
-			}
+			if msg.Urgent {
+				// Urgent messages are queued in
+				// memory and dispatched separately.
+				item := &crypto_proto.MessageList{
+					Job: []*crypto_proto.GrrMessage{msg}}
 
-			// RingBuffer.Enqueue may block if there is
-			// no room in the ring buffer. While waiting
-			// here we block the executor channel.
-			self.ring_buffer.Enqueue(serialized_msg)
+				serialized_msg, err := proto.Marshal(item)
+				if err != nil {
+					// Can't serialize the message
+					// - drop it on the floor.
+					continue
+				}
+				self.urgent_buffer.Enqueue(serialized_msg)
+
+			} else {
+				// NOTE: This is kind of a hack. We hold in
+				// memory a bunch of GrrMessage proto objects
+				// and we want to serialize them into a
+				// MessageList proto one at the time (so we
+				// can track how large the final message is
+				// going to be). We use the special wire
+				// format property of protobufs that repeated
+				// fields can be appended on the wire, and
+				// then parsed as a single message. This saves
+				// us encoding the GrrMessage just to see how
+				// large it is going to be and then encoding
+				// it again.
+				item := &crypto_proto.MessageList{
+					Job: []*crypto_proto.GrrMessage{msg}}
+				serialized_msg, err := proto.Marshal(item)
+				if err != nil {
+					// Can't serialize the message
+					// - drop it on the floor.
+					continue
+				}
+
+				// RingBuffer.Enqueue may block if there is
+				// no room in the ring buffer. While waiting
+				// here we block the executor channel.
+				self.ring_buffer.Enqueue(serialized_msg)
+			}
 
 			// We have just filled the message queue with
 			// enough data, trigger the sender to send
@@ -116,12 +147,25 @@ func (self *Sender) PumpExecutorToRingBuffer(ctx context.Context) {
 // Manages the sending of messages to the server. Reads messages from
 // the ring buffer if there are any to send and compose a Message List
 // to send. This also manages timing and retransmissions - blocks if
-// the server is not available.
+// the server is not available. This function should never exit in a
+// real client.
 func (self *Sender) PumpRingBufferToSendMessage(ctx context.Context) {
+	// We should never exit from this.
+	defer self.maybeCallOnExit()
+
 	for {
 		if atomic.LoadInt32(&self.IsPaused) == 0 {
+			// Grab some messages from the urgent ring buffer.
+			compressed_messages := LeaseAndCompress(self.urgent_buffer,
+				self.config_obj.Client.MaxUploadSize)
+			if len(compressed_messages) > 0 {
+				self.sendMessageList(ctx, compressed_messages,
+					true /* urgent */)
+				self.urgent_buffer.Commit()
+			}
+
 			// Grab some messages from the ring buffer.
-			compressed_messages := LeaseAndCompress(self.ring_buffer,
+			compressed_messages = LeaseAndCompress(self.ring_buffer,
 				self.config_obj.Client.MaxUploadSize)
 			if len(compressed_messages) > 0 {
 				// sendMessageList will block until
@@ -130,7 +174,8 @@ func (self *Sender) PumpRingBufferToSendMessage(ctx context.Context) {
 				// know the messages are sent so we
 				// can commit them from the ring
 				// buffer.
-				self.sendMessageList(ctx, compressed_messages)
+				self.sendMessageList(ctx, compressed_messages,
+					false /* urgent */)
 				self.ring_buffer.Commit()
 
 				// We need to make sure our memory
@@ -158,7 +203,7 @@ func (self *Sender) PumpRingBufferToSendMessage(ctx context.Context) {
 
 			// Wait a minimum amount of time to allow for
 			// responses to be queued in the same POST.
-		case <-time.After(self.minPoll):
+		case <-self.clock.After(self.minPoll):
 			continue
 		}
 	}
@@ -180,13 +225,22 @@ func NewSender(
 	enroller *Enroller,
 	logger *logging.LogContext,
 	name string,
-	handler string) *Sender {
-	result := &Sender{
-		NotificationReader: NewNotificationReader(config_obj, connector, manager,
-			executor, enroller, logger, name, handler),
-		ring_buffer: ring_buffer,
-		release:     make(chan bool),
+	handler string,
+	on_exit func(),
+	clock utils.Clock) (*Sender, error) {
+
+	if config_obj.Client == nil {
+		return nil, errors.New("Client not configured")
 	}
 
-	return result
+	result := &Sender{
+		NotificationReader: NewNotificationReader(config_obj, connector, manager,
+			executor, enroller, logger, name, handler, on_exit, clock),
+		ring_buffer:   ring_buffer,
+		urgent_buffer: NewRingBuffer(config_obj, 2*config_obj.Client.MaxUploadSize),
+		release:       make(chan bool),
+		clock:         clock,
+	}
+
+	return result, nil
 }

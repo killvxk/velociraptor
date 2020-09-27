@@ -27,11 +27,16 @@ const SearchArtifactController = function(
     // A list of descriptors that matched the search term.
     this.matchingDescriptors = [];
 
-  this.reportParams = {};
+    this.reportParams = {};
 
-  this.param_types = {};
-  this.param_descriptions = {};
-  this.paramDescriptors = {};
+    this.tools = {};
+    this.param_types = {};
+    this.param_info = {};
+    this.param_descriptions = {};
+    this.paramDescriptors = {};
+
+    this.search_focus = true;
+    this.focus_parameters = false;
 
     /** @private {!grrUi.core.apiService.ApiService} */
     this.grrApiService_ = grrApiService;
@@ -42,18 +47,35 @@ const SearchArtifactController = function(
     this.scope_.$watch('controller.search',
                        this.onSearchChange_.bind(this));
 
+    this.scope_.$watch('names', this.onNamesChanged_.bind(this));
+};
+
+SearchArtifactController.prototype.onNamesChanged_ = function() {
     var self = this;
     if (this.scope_["names"].length>0) {
+        this.selectArtifact(this.scope_["names"][0]);
+
         this.grrApiService_.get("v1/GetArtifacts", {names: this.scope_["names"]}).then(
             function(response) {
                 var items = response['data'].items;
                 for(var i=0; i < items.length;i++) {
-                    var item = items[i];
-                    self.descriptors[item.name] = item;
+                  var item = items[i];
+                  self.descriptors[item.name] = item;
+
+                  var params = item.parameters;
+                  if (angular.isObject(params)) {
+                    for (var j=0; j<params.length; j++) {
+                        var param = params[j];
+
+                        self.param_types[param.name] = param.type;
+                        self.param_info[param.name] = param;
+                    }
+                  }
                 }
             });
     }
 };
+
 
 /**
  * Adds artifact with a given name to the list of selected names.
@@ -62,30 +84,53 @@ const SearchArtifactController = function(
  *     selected list.
  * @export
  */
-SearchArtifactController.prototype.add = function(name) {
+SearchArtifactController.prototype.add = function(name, e) {
+    if (angular.isDefined(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+    };
+
+  if (angular.isUndefined(name) || name == "") {
+    return;
+  }
+
     var self = this;
     var index = -1;
     for (var i = 0; i < self.scope_.names.length; ++i) {
         if (self.scope_.names[i] == name) {
             index = i;
-            break;
+
+            // The artifact is already in the added list, shift focus
+            // to the config param section. This allows for efficient
+            // keyboard navigation.
+            self.focus_parameters = true;
+            return ;
         }
     }
     if (index == -1) {
         self.scope_.names.push(name);
 
         for (var i=0; i<self.scope_.names.length; i++) {
-            var name = self.scope_.names[i];
-            var params = self.descriptors[name].parameters;
+            var artifact_name = self.scope_.names[i];
+            var params = self.descriptors[artifact_name].parameters;
             if (angular.isObject(params)) {
                 for (var j=0; j<params.length; j++) {
                     var param = params[j];
 
                     if (!angular.isDefined(self.scope_.params[param.name])) {
-                      self.scope_.params[param.name]= param.default || "";
-                      self.param_types[param.name] = param.type;
-                      self.param_descriptions[param.name] = param.description;
+                        self.scope_.params[param.name]= param.default || "";
+                        self.param_types[param.name] = param.type;
+                        self.param_info[param.name] = param;
+                        self.param_descriptions[param.name] = param.description;
                     }
+                }
+            }
+
+            if (angular.isObject(self.scope_.tools)) {
+                var tools = self.descriptors[artifact_name].tools || [];
+                for (var j=0; j<tools.length; j++) {
+                    var tool = tools[j];
+                    self.scope_.tools[tool.name] = tool;
                 }
             }
         }
@@ -130,7 +175,30 @@ SearchArtifactController.prototype.remove = function(name) {
                 delete self.scope_.params[k];
             }
         }
+
+        var is_tool_defined = function(key) {
+            for (var i = 0; i < self.scope_.names.length; ++i) {
+                var name = self.scope_.names[i];
+                var tools = self.descriptors[name].tools || [];
+                for (var j=0; j<tools.length; j++) {
+                    if (tools[j].name == key) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+
+        if (angular.isObject(self.scope_.tools)) {
+            for (var k in self.scope_.tools) {
+                if (self.scope_.tools.hasOwnProperty(k) && !is_tool_defined(k)) {
+                    delete self.scope_.tools[k];
+                }
+            }
+        }
     }
+
+  this.selectedName = null;
 };
 
 /**
@@ -144,12 +212,21 @@ SearchArtifactController.prototype.clear = function() {
   }.bind(this));
 };
 
-SearchArtifactController.prototype.selectArtifact = function(name) {
-  this.selectedName = name;
-  this.reportParams= {
-    artifact: this.selectedName,
-    type: "ARTIFACT_DESCRIPTION",
-  };
+SearchArtifactController.prototype.selectArtifact = function(name, e) {
+    if (angular.isDefined(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+    };
+
+    if (this.selectedName == name) {
+        return this.add(name);
+    }
+
+    this.selectedName = name;
+    this.reportParams= {
+        artifact: this.selectedName,
+        type: "ARTIFACT_DESCRIPTION",
+    };
 };
 
 SearchArtifactController.prototype.onSearchChange_ = function() {
@@ -178,9 +255,10 @@ exports.SearchArtifactDirective = function() {
       scope: {
           names: '=',
           params: '=',
+          tools: '=',
           type: "=",
       },
-      templateUrl: '/static/angular-components/artifact/' +
+      templateUrl: window.base_path+'/static/angular-components/artifact/' +
           'search-artifact.html',
       controller: SearchArtifactController,
       controllerAs: 'controller'

@@ -1,23 +1,14 @@
 syntax = "proto3";
 
-import "www.velocidex.com/golang/velociraptor/proto/semantic.proto";
-import "www.velocidex.com/golang/velociraptor/flows/proto/flows.proto";
-import "www.velocidex.com/golang/velociraptor/crypto/proto/jobs.proto";
-import "www.velocidex.com/golang/velociraptor/actions/proto/vql.proto";
+import "proto/semantic.proto";
+import "flows/proto/artifact_collector.proto";
 
 package proto;
 
+option go_package = "www.velocidex.com/golang/velociraptor/api/proto";
 
-message HuntConditionGeneric {
-    VQLCollectorArgs flow_condition_query = 4 [(sem_type) = {
-            description: "A VQL query to run in order to collect information for determining if the hunt applies to this client.",
-            friendly_name: "Client Side Condition",
-        }];
-    VQLCollectorArgs server_side_condition_query = 5 [(sem_type) = {
-            description: "A VQL query which runs server side on the results of the flow_condition_query. If any rows are returned then the condition is deemed fulfilled and the hunt will be scheduled."
-            friendly_name: "Server Side Condition",
-        }];
-}
+import "flows.proto";
+
 
 message HuntLabelCondition {
     repeated string label = 1;
@@ -39,12 +30,9 @@ message HuntCondition {
         description: "The condition to match hosts for this hunt.",
     };
 
-    oneof union_field {
-        HuntConditionGeneric generic_condition = 1 [(sem_type) = {
-                friendly_name: "Generic Condition",
-                default: '{"flow_condition_query": {"Query": [{"Name": "Collect default client info", "VQL": "SELECT OS, Architecture, Fqdn, Platform, config.Client_labels from info()"}]}, "server_side_condition_query": {"Query": [{"Name": "Select client by info", "VQL": "SELECT * from rows where Fqdn =~ \'.\'"}]}}',
-            }];
+    HuntLabelCondition excluded_labels = 4;
 
+    oneof union_field {
         HuntLabelCondition labels = 2 [(sem_type) = {
                 friendly_name: "Match by label",
             }];
@@ -81,6 +69,8 @@ message HuntStats {
             description: "If this is set then the hunt is stopped. This field "
             "is manipulated by the hunt manager."
         }];
+
+    AvailableDownloads available_downloads = 2;
 }
 
 
@@ -115,9 +105,8 @@ message Hunt {
             description: "Hunt's description",
         }];
 
-    FlowRunnerArgs start_request = 3 [(sem_type) = {
-            description: "Launch this flow on the client if the condition is true",
-            friendly_name: "Launch Flow",
+    ArtifactCollectorArgs start_request = 16 [(sem_type) = {
+            description: "Launch this collection on the client if the condition is true",
         }];
 
     HuntCondition condition = 4 [(sem_type) = {

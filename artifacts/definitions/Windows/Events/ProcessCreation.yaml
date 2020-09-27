@@ -5,12 +5,7 @@ description: |
 type: CLIENT_EVENT
 
 parameters:
-  # This query will not see processes that complete within 1 second.
-  - name: wmiQuery
-    default: SELECT * FROM __InstanceCreationEvent WITHIN 1 WHERE
-      TargetInstance ISA 'Win32_Process'
-
-  # This query is faster but contains less data. If the process
+  # This query is fast but contains less data. If the process
   # terminates too quickly we miss its commandline.
   - name: eventQuery
     default: SELECT * FROM Win32_ProcessStartTrace
@@ -18,26 +13,38 @@ parameters:
 sources:
   - precondition:
       SELECT OS From info() where OS = 'windows'
-    queries:
-      - |
+    query: |
+        // Get information about the process
+        LET get_pid_query(Lpid) = SELECT Pid, Ppid, Name FROM if(condition=Lpid > 0,
+        then={
+            SELECT Pid, Ppid, Name FROM pslist(pid=Lpid)
+        })
+
+        // Build the call chain. Cache the results for a short time.
+        LET pstree(LookupPid) = SELECT * FROM foreach(
+          row=cache(func=get_pid_query(Lpid=LookupPid), key=str(str=LookupPid)),
+          query={
+              SELECT * FROM chain(
+            a={
+              SELECT Pid, Ppid, Name FROM scope()
+            }, b={
+              SELECT Pid, Ppid, Name FROM pstree(LookupPid=Ppid)
+            })
+        })
+
+        LET call_chain(LookupPid) = SELECT Pid, Ppid, Name FROM pstree(LookupPid=LookupPid)
+
         // Convert the timestamp from WinFileTime to Epoch.
-        SELECT timestamp(epoch=atoi(string=Parse.TIME_CREATED) / 10000000 - 11644473600 ) as Timestamp,
+        SELECT timestamp(winfiletime=atoi(string=Parse.TIME_CREATED)) as Timestamp,
                Parse.ParentProcessID as PPID,
                Parse.ProcessID as PID,
                Parse.ProcessName as Name, {
-                 SELECT CommandLine
-                 FROM wmi(
-                   query="SELECT * FROM Win32_Process WHERE ProcessID = " +
-                    format(format="%v", args=Parse.ProcessID),
-                   namespace="ROOT/CIMV2")
+                 SELECT CommandLine FROM pslist(pid=Parse.ProcessID)
                } AS CommandLine,
                {
-                 SELECT CommandLine
-                 FROM wmi(
-                   query="SELECT * FROM Win32_Process WHERE ProcessID = " +
-                    format(format="%v", args=Parse.ParentProcessID),
-                   namespace="ROOT/CIMV2")
-               } AS ParentInfo
+                 SELECT CommandLine FROM pslist(pid=Parse.ParentProcessID)
+               } AS ParentInfo,
+               join(array=call_chain(LookupPid=Parse.ProcessID).Name, sep=" <- ") AS CallChain
         FROM wmi_events(
            query=eventQuery,
            wait=5000000,   // Do not time out.

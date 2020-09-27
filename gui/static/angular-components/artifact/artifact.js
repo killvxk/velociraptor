@@ -4,8 +4,9 @@ goog.module('grrUi.artifact.artifact');
 goog.module.declareLegacyNamespace();
 
 const {ArtifactsViewerDirective} = goog.require('grrUi.artifact.artifactViewerDirective');
+const {AceService} = goog.require('grrUi.core.aceService');
 const {FormDirective} = goog.require('grrUi.artifact.formDirective');
-
+const {CSVFormDirective} = goog.require('grrUi.artifact.csvFormDirective');
 const {LineChartDirective} = goog.require('grrUi.artifact.lineChartDirective');
 const {TimelineDirective} = goog.require('grrUi.artifact.timelineDirective');
 const {ReportingDirective} = goog.require('grrUi.artifact.reportingDirective');
@@ -13,23 +14,25 @@ const {SearchArtifactDirective} = goog.require('grrUi.artifact.searchArtifactDir
 const {ClientEventDirective} = goog.require('grrUi.artifact.clientEventDirective');
 const {ServerArtifactsDirective} = goog.require('grrUi.artifact.serverArtifactsDirective');
 const {ServerEventsDirective} = goog.require('grrUi.artifact.serverEventsDirective');
+const {AddArtifactDirective} = goog.require('grrUi.artifact.addArtifactDirective');
+const {ToolViewerDirective} = goog.require('grrUi.artifact.toolViewerDirective');
 const {coreModule} = goog.require('grrUi.core.core');
-const {formsModule} = goog.require('grrUi.forms.forms');
-const {semanticModule} = goog.require('grrUi.semantic.semantic');
 
 /**
  * Module with artifact-related directives.
  */
 exports.artifactModule = angular.module(
     'grrUi.artifact',
-    [coreModule.name, formsModule.name, semanticModule.name,
-     'ui.bootstrap']);
+    [coreModule.name, 'ui.ace', 'ui.bootstrap']);
 
 exports.artifactModule.directive(
     ArtifactsViewerDirective.directive_name, ArtifactsViewerDirective);
 
 exports.artifactModule.directive(
     FormDirective.directive_name, FormDirective);
+
+exports.artifactModule.directive(
+    CSVFormDirective.directive_name, CSVFormDirective);
 
 exports.artifactModule.directive(
     LineChartDirective.directive_name, LineChartDirective);
@@ -50,10 +53,13 @@ exports.artifactModule.directive(
 exports.artifactModule.directive(
     ServerArtifactsDirective.directive_name,
     ServerArtifactsDirective);
+
 exports.artifactModule.directive(
     ServerEventsDirective.directive_name,
     ServerEventsDirective);
 
-exports.artifactModule.run(function(grrSemanticValueDirectivesRegistryService) {
-  var registry = grrSemanticValueDirectivesRegistryService;
-});
+exports.artifactModule.directive(
+    ToolViewerDirective.directive_name, ToolViewerDirective);
+
+exports.artifactModule.directive(
+    AddArtifactDirective.directive_name, AddArtifactDirective);

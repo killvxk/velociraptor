@@ -21,12 +21,73 @@ package server
 
 import (
 	"context"
+	"strings"
 
-	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
+	"github.com/Velocidex/ordereddict"
+	"www.velocidex.com/golang/velociraptor/acls"
+	"www.velocidex.com/golang/velociraptor/artifacts"
+	"www.velocidex.com/golang/velociraptor/datastore"
 	"www.velocidex.com/golang/velociraptor/file_store"
+	"www.velocidex.com/golang/velociraptor/file_store/directory"
 	vql_subsystem "www.velocidex.com/golang/velociraptor/vql"
 	"www.velocidex.com/golang/vfilter"
 )
+
+type DeleteFileStoreArgs struct {
+	VFSPath string `vfilter:"required,field=path,doc=A VFS path to remove"`
+}
+
+type DeleteFileStore struct{}
+
+func (self *DeleteFileStore) Call(ctx context.Context,
+	scope *vfilter.Scope,
+	args *ordereddict.Dict) vfilter.Any {
+	arg := &DeleteFileStoreArgs{}
+
+	err := vql_subsystem.CheckAccess(scope, acls.SERVER_ADMIN)
+	if err != nil {
+		scope.Log("flows: %s", err)
+		return vfilter.Null{}
+	}
+
+	err = vfilter.ExtractArgs(scope, args, arg)
+	if err != nil {
+		scope.Log("file_store_delete: %s", err.Error())
+		return vfilter.Null{}
+	}
+
+	config_obj, ok := artifacts.GetServerConfig(scope)
+	if !ok {
+		scope.Log("Command can only run on the server")
+		return vfilter.Null{}
+	}
+
+	db, err := datastore.GetDB(config_obj)
+	if err != nil {
+		return vfilter.Null{}
+	}
+
+	file_store_factory := file_store.GetFileStore(config_obj)
+	if strings.HasSuffix(arg.VFSPath, "db") {
+		err = db.DeleteSubject(config_obj, strings.TrimSuffix(arg.VFSPath, ".db"))
+	} else {
+		err = file_store_factory.Delete(arg.VFSPath)
+	}
+
+	if err != nil {
+		scope.Log("file_store_delete: %s", err.Error())
+		return vfilter.Null{}
+	}
+	return arg.VFSPath
+}
+
+func (self DeleteFileStore) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfilter.FunctionInfo {
+	return &vfilter.FunctionInfo{
+		Name:    "file_store_delete",
+		Doc:     "Delete file store paths into full filesystem paths. ",
+		ArgType: type_map.AddType(scope, &DeleteFileStoreArgs{}),
+	}
+}
 
 type FileStoreArgs struct {
 	VFSPath []string `vfilter:"required,field=path,doc=A VFS path to convert"`
@@ -36,7 +97,7 @@ type FileStore struct{}
 
 func (self *FileStore) Call(ctx context.Context,
 	scope *vfilter.Scope,
-	args *vfilter.Dict) vfilter.Any {
+	args *ordereddict.Dict) vfilter.Any {
 	arg := &FileStoreArgs{}
 	err := vfilter.ExtractArgs(scope, args, arg)
 	if err != nil {
@@ -44,8 +105,7 @@ func (self *FileStore) Call(ctx context.Context,
 		return vfilter.Null{}
 	}
 
-	any_config_obj, _ := scope.Resolve("server_config")
-	config_obj, ok := any_config_obj.(*config_proto.Config)
+	config_obj, ok := artifacts.GetServerConfig(scope)
 	if !ok {
 		scope.Log("Command can only run on the server")
 		return vfilter.Null{}
@@ -54,7 +114,7 @@ func (self *FileStore) Call(ctx context.Context,
 	result := []string{}
 	file_store_factory := file_store.GetFileStore(config_obj)
 	for _, path := range arg.VFSPath {
-		file_path := file_store_factory.(*file_store.DirectoryFileStore).
+		file_path := file_store_factory.(*directory.DirectoryFileStore).
 			FilenameToFileStorePath(path)
 		result = append(result, file_path)
 	}
@@ -72,4 +132,5 @@ func (self FileStore) Info(scope *vfilter.Scope, type_map *vfilter.TypeMap) *vfi
 
 func init() {
 	vql_subsystem.RegisterFunction(&FileStore{})
+	vql_subsystem.RegisterFunction(&DeleteFileStore{})
 }

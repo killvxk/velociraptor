@@ -37,7 +37,7 @@
 package datastore
 
 import (
-	"fmt"
+	"compress/gzip"
 	"io"
 	"io/ioutil"
 	"os"
@@ -49,17 +49,31 @@ import (
 
 	"github.com/golang/protobuf/jsonpb"
 	"github.com/golang/protobuf/proto"
+	"github.com/golang/protobuf/ptypes/empty"
 	errors "github.com/pkg/errors"
 	config_proto "www.velocidex.com/golang/velociraptor/config/proto"
 	"www.velocidex.com/golang/velociraptor/constants"
 	crypto_proto "www.velocidex.com/golang/velociraptor/crypto/proto"
 	"www.velocidex.com/golang/velociraptor/logging"
-	"www.velocidex.com/golang/velociraptor/testing"
-	"www.velocidex.com/golang/velociraptor/urns"
+	"www.velocidex.com/golang/velociraptor/paths"
+	"www.velocidex.com/golang/velociraptor/utils"
+	"www.velocidex.com/golang/velociraptor/vtesting"
+)
+
+var (
+	file_based_imp = &FileBaseDataStore{
+		clock: vtesting.RealClock{},
+	}
+)
+
+const (
+	// On windows all file paths must be prefixed by this to
+	// support long paths.
+	WINDOWS_LFN_PREFIX = "\\\\?\\"
 )
 
 type FileBaseDataStore struct {
-	clock testing.Clock
+	clock vtesting.Clock
 }
 
 func (self *FileBaseDataStore) GetClientTasks(
@@ -67,11 +81,13 @@ func (self *FileBaseDataStore) GetClientTasks(
 	client_id string,
 	do_not_lease bool) ([]*crypto_proto.GrrMessage, error) {
 	result := []*crypto_proto.GrrMessage{}
-	now := self.clock.Now().UTC().UnixNano() / 1000
-	tasks_urn := urns.BuildURN("clients", client_id, "tasks")
-	now_urn := tasks_urn + fmt.Sprintf("/%d", now)
+	now := uint64(self.clock.Now().UTC().UnixNano() / 1000)
 
-	tasks, err := self.ListChildren(config_obj, tasks_urn, 0, 100)
+	client_path_manager := paths.NewClientPathManager(client_id)
+	now_urn := client_path_manager.Task(now).Path()
+
+	tasks, err := self.ListChildren(
+		config_obj, client_path_manager.TasksDirectory().Path(), 0, 100)
 	if err != nil {
 		return nil, err
 	}
@@ -106,10 +122,9 @@ func (self *FileBaseDataStore) UnQueueMessageForClient(
 	client_id string,
 	message *crypto_proto.GrrMessage) error {
 
-	task_urn := urns.BuildURN("clients", client_id, "tasks",
-		fmt.Sprintf("/%d", message.TaskId))
-
-	return self.DeleteSubject(config_obj, task_urn)
+	client_path_manager := paths.NewClientPathManager(client_id)
+	return self.DeleteSubject(config_obj,
+		client_path_manager.Task(message.TaskId).Path())
 }
 
 func (self *FileBaseDataStore) QueueMessageForClient(
@@ -117,12 +132,10 @@ func (self *FileBaseDataStore) QueueMessageForClient(
 	client_id string,
 	req *crypto_proto.GrrMessage) error {
 
-	now := self.clock.Now().UTC().UnixNano() / 1000
-	subject := urns.BuildURN("clients", client_id, "tasks",
-		fmt.Sprintf("/%d", now))
-
-	req.TaskId = uint64(now)
-	return self.SetSubject(config_obj, subject, req)
+	req.TaskId = uint64(self.clock.Now().UTC().UnixNano() / 1000)
+	client_path_manager := paths.NewClientPathManager(client_id)
+	return self.SetSubject(config_obj,
+		client_path_manager.Task(req.TaskId).Path(), req)
 }
 
 func (self *FileBaseDataStore) GetSubject(
@@ -142,6 +155,42 @@ func (self *FileBaseDataStore) GetSubject(
 	}
 
 	return proto.Unmarshal(serialized_content, message)
+}
+
+func (self *FileBaseDataStore) Walk(config_obj *config_proto.Config,
+	root string, walkFn WalkFunc) error {
+	root_path, err := urnToFilename(config_obj, root)
+	if err != nil {
+		return err
+	}
+
+	root_path = strings.TrimSuffix(root_path, ".db")
+
+	return filepath.Walk(root_path,
+		func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if info.IsDir() {
+				return nil
+			}
+
+			// We are only interested in filenames that end with .db
+			basename := strings.TrimSuffix(info.Name(), ".gz")
+			if !strings.HasSuffix(basename, ".db") {
+				return nil
+			}
+
+			path = strings.TrimSuffix(path, ".gz")
+
+			urn, err := FilenameToURN(config_obj, path)
+			if err != nil {
+				return err
+			}
+
+			return walkFn(urn)
+		})
 }
 
 func (self *FileBaseDataStore) SetSubject(
@@ -183,6 +232,14 @@ func (self *FileBaseDataStore) DeleteSubject(
 		return errors.WithStack(err)
 	}
 
+	filename += ".gz"
+	err = os.Remove(filename)
+
+	// It is ok to remove a file that does not exist.
+	if err != nil && os.IsExist(err) {
+		return errors.WithStack(err)
+	}
+
 	// Note: We do not currently remove empty intermediate
 	// directories.
 	return nil
@@ -195,7 +252,7 @@ func listChildren(config_obj *config_proto.Config,
 		return nil, err
 	}
 	dirname := strings.TrimSuffix(filename, ".db")
-	children, err := ioutil.ReadDir(dirname)
+	children, err := utils.ReadDir(dirname)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []os.FileInfo{}, nil
@@ -227,12 +284,12 @@ func (self *FileBaseDataStore) ListChildren(
 		}
 
 		name := UnsanitizeComponent(children[i].Name())
+		name = strings.TrimSuffix(name, ".gz")
 		if !strings.HasSuffix(name, ".db") {
 			continue
 		}
-		result = append(
-			result,
-			urn+"/"+strings.TrimSuffix(name, ".db"))
+		name = strings.TrimSuffix(name, ".db")
+		result = append(result, utils.PathJoin(urn, name, "/"))
 	}
 	return result, nil
 }
@@ -247,7 +304,7 @@ func (self *FileBaseDataStore) SetIndex(
 
 	for _, keyword := range keywords {
 		subject := path.Join(index_urn, strings.ToLower(keyword), entity)
-		err := writeContentToFile(config_obj, subject, []byte{})
+		err := self.SetSubject(config_obj, subject, &empty.Empty{})
 		if err != nil {
 			return err
 		}
@@ -310,8 +367,9 @@ func (self *FileBaseDataStore) SearchClients(
 		}
 
 		for _, child_urn := range children {
-			name := strings.TrimSuffix(
-				UnsanitizeComponent(child_urn.Name()), ".db")
+			name := UnsanitizeComponent(child_urn.Name())
+			name = strings.TrimSuffix(name, ".gz")
+			name = strings.TrimSuffix(name, ".db")
 			seen[name] = true
 
 			if uint64(len(seen)) > offset+limit {
@@ -329,9 +387,9 @@ func (self *FileBaseDataStore) SearchClients(
 			return result
 		}
 		for _, set := range sets {
-			name := strings.TrimSuffix(
-				UnsanitizeComponent(set.Name()), ".db")
-
+			name := UnsanitizeComponent(set.Name())
+			name = strings.TrimSuffix(name, ".gz")
+			name = strings.TrimSuffix(name, ".db")
 			matched, err := path.Match(query, name)
 			if err != nil {
 				// Can only happen if pattern is invalid.
@@ -370,14 +428,6 @@ func (self *FileBaseDataStore) SearchClients(
 
 // Called to close all db handles etc. Not thread safe.
 func (self *FileBaseDataStore) Close() {}
-
-func init() {
-	db := FileBaseDataStore{
-		clock: testing.RealClock{},
-	}
-
-	RegisterImplementation("FileBaseDataStore", &db)
-}
 
 var hexTable = []rune("0123456789ABCDEF")
 
@@ -460,16 +510,13 @@ func UnsanitizeComponent(component_str string) string {
 }
 
 func urnToFilename(config_obj *config_proto.Config, urn string) (string, error) {
-	if config_obj.Datastore.Location == "" {
+	if config_obj.Datastore == nil ||
+		config_obj.Datastore.Location == "" {
 		return "", errors.New("No Datastore_location is set in the config.")
 	}
 
 	components := []string{config_obj.Datastore.Location}
-	for idx, component := range strings.Split(urn, "/") {
-		if idx == 0 && component == "aff4:" {
-			continue
-		}
-
+	for _, component := range utils.SplitComponents(urn) {
 		components = append(components, string(SanitizeString(component)))
 	}
 
@@ -486,6 +533,8 @@ func urnToFilename(config_obj *config_proto.Config, urn string) (string, error) 
 		return "\\\\?\\" + result, nil
 	}
 
+	// fmt.Printf("Accessing on %v\n", result)
+
 	return result, nil
 }
 
@@ -499,8 +548,14 @@ func writeContentToFile(config_obj *config_proto.Config, urn string, data []byte
 
 	// Try to create intermediate directories and try again.
 	if err != nil && os.IsNotExist(err) {
-		os.MkdirAll(filepath.Dir(filename), 0700)
+		err = os.MkdirAll(filepath.Dir(filename), 0700)
+		if err != nil {
+			return err
+		}
 		file, err = os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0660)
+		if err != nil {
+			return err
+		}
 	}
 	if err != nil {
 		logging.GetLogger(config_obj, &logging.FrontendComponent).Error(
@@ -509,7 +564,10 @@ func writeContentToFile(config_obj *config_proto.Config, urn string, data []byte
 	}
 	defer file.Close()
 
-	file.Truncate(0)
+	err = file.Truncate(0)
+	if err != nil {
+		return err
+	}
 
 	_, err = file.Write(data)
 	if err != nil {
@@ -527,36 +585,55 @@ func readContentFromFile(
 	}
 
 	file, err := os.Open(filename)
-	if err != nil {
-		if !must_exist && os.IsNotExist(err) {
-			return []byte{}, nil
-		}
-		return nil, errors.WithStack(err)
-	}
-	defer file.Close()
+	if err == nil {
+		defer file.Close()
 
-	result, err := ioutil.ReadAll(
-		io.LimitReader(file, constants.MAX_MEMORY))
-	return result, errors.WithStack(err)
+		result, err := ioutil.ReadAll(
+			io.LimitReader(file, constants.MAX_MEMORY))
+		return result, errors.WithStack(err)
+	}
+
+	// File does not exist - try the gzip version
+	if os.IsNotExist(err) {
+		file, err = os.Open(filename + ".gz")
+		if err == nil {
+			zr, err := gzip.NewReader(file)
+			if err != nil {
+				return nil, errors.WithStack(err)
+			}
+			result, err := ioutil.ReadAll(
+				io.LimitReader(zr, constants.MAX_MEMORY))
+			return result, errors.WithStack(err)
+		}
+	}
+
+	// Its ok if the file does not exist - no error.
+	if !must_exist && os.IsNotExist(err) {
+		return []byte{}, nil
+	}
+	return nil, errors.WithStack(err)
 }
 
 // Convert a file name from the data store to a urn.
-func FilenameToURN(config_obj *config_proto.Config, filename string) (*string, error) {
-	if config_obj.Datastore.Implementation != "FileBaseDataStore" {
-		return nil, errors.New("Unsupported data store")
+func FilenameToURN(config_obj *config_proto.Config, filename string) (string, error) {
+	if runtime.GOOS == "windows" {
+		filename = strings.TrimPrefix(filename, WINDOWS_LFN_PREFIX)
 	}
 
-	if !strings.HasPrefix(filename, config_obj.Datastore.Location) {
-		return nil, errors.New("Filename is not within the FileBaseDataStore location.")
-	}
+	filename = strings.TrimPrefix(
+		filename, config_obj.Datastore.FilestoreDirectory)
 
-	location := strings.TrimSuffix(config_obj.Datastore.Location, "/")
 	components := []string{}
 	for _, component := range strings.Split(
-		strings.TrimPrefix(filename, location), "/") {
-		components = append(components, UnsanitizeComponent(component))
+		filename,
+		string(os.PathSeparator)) {
+		component = strings.TrimSuffix(component, ".gz")
+		component = strings.TrimSuffix(component, ".db")
+		components = append(components,
+			string(UnsanitizeComponent(component)))
 	}
 
-	result := strings.TrimSuffix("aff4:"+strings.Join(components, "/"), ".db")
-	return &result, nil
+	// Filestore filenames always use / as separator.
+	result := utils.JoinComponents(components, "/")
+	return result, nil
 }
